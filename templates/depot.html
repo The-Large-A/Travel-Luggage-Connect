@@ -344,7 +344,7 @@ fRouteSearch.addEventListener('input', function () {
     const q = this.value.trim();
     clearTimeout(_fTimer);
     _fTimer = setTimeout(() => {
-        fetch(`/api/transport/routes?q=${encodeURIComponent(q)}&limit=25`)
+        fetch(`/api/transport/routes?q=${encodeURIComponent(q)}&limit=25&depot_only=1`)
             .then(r => r.json())
             .then(routes => {
                 fRouteResults.innerHTML = '';

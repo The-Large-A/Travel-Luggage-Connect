@@ -207,6 +207,64 @@ def _haversine_km(a, b) -> float:
     return 2 * R * math.asin(math.sqrt(h))
 
 
+def _parse_seat(value, capacity=None, upper=80):
+    """
+    Parse a seat number, bounded by the bus capacity when it is known (else a
+    sane upper limit). Returns (seat_int, error_message) — error is None on OK.
+    """
+    try:
+        seat = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None, "Seat number must be a whole number."
+    limit = capacity if capacity else upper
+    if seat < 1 or seat > limit:
+        return None, f"Seat number must be between 1 and {limit}."
+    return seat, None
+
+
+def _parse_travel_date(value):
+    """
+    Parse a YYYY-MM-DD date and reject anything past tomorrow. The forms cap the date
+    client-side, and an unparseable date silently collapses the matching window,
+    so it is validated here too. Returns (date_str, error_message).
+    """
+    try:
+        d = datetime.strptime(str(value).strip(), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None, "Please provide a valid date."
+    # One day of slack: the browser caps the picker using the CLIENT's local date,
+    # so a TN (IST) user just past midnight would otherwise be rejected by a
+    # server running on UTC. Anything beyond tomorrow is still refused.
+    if d.date() > (datetime.now() + timedelta(days=1)).date():
+        return None, "The date cannot be in the future."
+    return d.strftime("%Y-%m-%d"), None
+
+
+def depot_serves_route(depot: dict, route: dict) -> bool:
+    """
+    True when a depot may log a found item against this route: either it
+    operates the service, or the route actually calls at the depot's city (an
+    item is handed in wherever the bus reaches).
+
+    Both clauses are needed — an operating depot is not always itself a listed
+    stop on its own route, and a few routes have no staffed depot among their
+    stops at all. Uses the denormalized `stop_cities` when present, otherwise
+    resolves the stop documents.
+    """
+    if not depot or not route:
+        return False
+    if route.get("operating_depot_code") and \
+       route["operating_depot_code"] == depot.get("depot_code"):
+        return True
+    city = (depot.get("city") or depot.get("stop") or "").strip().lower()
+    if not city:
+        return False
+    cities = route.get("stop_cities")
+    if cities is None:
+        cities = [(x.get("city") or "").strip().lower() for x in route_stops(route)]
+    return city in cities
+
+
 def build_seatmap(bus: dict) -> dict:
     """
     Build a seat-map descriptor for the visual picker from a bus's capacity and
@@ -518,11 +576,34 @@ def submit_lost():
         flash('Invalid boarding or alighting stop for selected route.', 'error')
         return redirect(url_for('index'))
 
-    # Resolve trip → authoritative bus + departure; stop ids → display names.
-    trip           = get_trip(trip_id)
-    bus_id         = trip.get("bus_id") if trip else None
-    departure_time = trip.get("departure_time") if trip else None
-    stops_map      = {s["stop_id"]: s["name"] for s in route_stops(route)}
+    if boarding_stop_id == alighting_stop_id:
+        # The directional luggage filter can never satisfy src == dst, so such a
+        # report would sit unmatchable forever. Reject it up front.
+        flash('Boarding and alighting stops must be different.', 'error')
+        return redirect(url_for('index'))
+
+    date, err = _parse_travel_date(date)
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('index'))
+
+    # The trip must exist AND actually run on the selected route — trip_id is
+    # client-supplied and drives the exact-trip match signal.
+    trip = get_trip(trip_id)
+    if not trip or trip.get("route_id") != route_id:
+        flash('The selected bus/service does not run on that route.', 'error')
+        return redirect(url_for('index'))
+
+    bus            = get_bus(trip.get("bus_id"))
+    bus_id         = trip.get("bus_id")
+    departure_time = trip.get("departure_time")
+
+    seat_no, err = _parse_seat(seat_no, (bus or {}).get("capacity"))
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('index'))
+
+    stops_map = {s["stop_id"]: s["name"] for s in route_stops(route)}
 
     tracking_id = generate_tracking_id()
     request_id  = uuid.uuid4().hex   # Internal unique key for DB relations
@@ -539,7 +620,7 @@ def submit_lost():
         "route_name":        f"{route.get('origin_name')} → {route.get('dest_name')}",
         "trip_id":           trip_id,
         "bus_id":            bus_id,
-        "bus_registration":  (get_bus(bus_id) or {}).get("registration_no") if bus_id else None,
+        "bus_registration":  (bus or {}).get("registration_no"),
         "departure_time":    departure_time,
         "seat_no":           seat_no,
         "boarding_stop_id":  boarding_stop_id,
@@ -671,9 +752,33 @@ def submit_found():
         flash('Invalid route selected.', 'error')
         return redirect(url_for('depot_dashboard'))
 
+    if not depot_serves_route(depot, route):
+        flash('This depot does not serve the selected route.', 'error')
+        return redirect(url_for('depot_dashboard'))
+
+    date, err = _parse_travel_date(date)
+    if err:
+        flash(err, 'error')
+        return redirect(url_for('depot_dashboard'))
+
     # Optional trip → carries the bus the item came off, for exact matching.
-    trip   = get_trip(trip_id) if trip_id else None
-    bus_id = trip.get("bus_id") if trip else (request.form.get('bus_id') or None)
+    # When supplied it must actually run on the selected route (it drives the
+    # exact-trip signal). bus_id is derived from the trip only — never read from
+    # the form, which would let a client forge the same-bus score boost.
+    trip = None
+    if trip_id:
+        trip = get_trip(trip_id)
+        if not trip or trip.get("route_id") != route_id:
+            flash('The selected bus/service does not run on that route.', 'error')
+            return redirect(url_for('depot_dashboard'))
+    bus_id = trip.get("bus_id") if trip else None
+
+    if found_seat_area is not None:
+        capacity = (get_bus(bus_id) or {}).get("capacity") if bus_id else None
+        found_seat_area, err = _parse_seat(found_seat_area, capacity)
+        if err:
+            flash(err, 'error')
+            return redirect(url_for('depot_dashboard'))
 
     # Handle optional image upload
     image_path = None
@@ -777,6 +882,17 @@ def api_transport_routes():
             {"route_no": rx}, {"origin_name": rx},
             {"dest_name": rx}, {"via": rx},
         ]}
+
+    # depot_only=1 narrows the catalog to routes the logged-in depot may log
+    # found items against, so the picker cannot offer a route that submit_found
+    # would then reject. Mirrors depot_serves_route().
+    if request.args.get('depot_only') == '1' and session.get('depot_phone'):
+        depot = depots_collection.find_one({"phone": session['depot_phone']}) or {}
+        scope = {"$or": [
+            {"operating_depot_code": depot.get("depot_code")},
+            {"stop_cities": (depot.get("city") or depot.get("stop") or "").strip().lower()},
+        ]}
+        query = {"$and": [query, scope]} if query else scope
 
     cursor = routes_collection.find(
         query,
