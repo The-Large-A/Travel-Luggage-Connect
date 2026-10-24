@@ -105,6 +105,34 @@ python app.py
 ```
 Visit `http://127.0.0.1:5003` in your browser.
 
+### Run everything on a local MongoDB (no Atlas needed)
+`local_mongo.py` runs a local MongoDB with the same seed data used to set up the online database. It
+replays `seed_db.py`, `seed_transport.py` (deterministic), `seed_bookings.py`, `seed_matches.py` and
+`seed_claims.py`.
+
+1. Download the MongoDB Community Server zip for Windows from mongodb.com (tested with 9.0.2). Extract it
+   to `%USERPROFILE%\mongodb\`, so that `mongod.exe` is at `%USERPROFILE%\mongodb\<folder>\bin\mongod.exe`.
+   Set `MONGODB_HOME` to use another location.
+2. Start MongoDB and seed everything (idempotent):
+   ```bash
+   python local_mongo.py up
+   ```
+3. Run the app against it. OTPs are printed in this terminal:
+   ```bash
+   python local_mongo.py app
+   ```
+4. Use `python local_mongo.py status`, `stop` and `reset` (drop and reseed) as needed.
+
+Details:
+- MongoDB runs as a **single-node replica set**, so Feature 3's handover uses real multi-document
+  transactions.
+- Data lives in `%USERPROFILE%\mongodb\data`, outside the repository and OneDrive.
+- `.env` is never modified. The local connection string, and a stable `SIGNING_SECRET` when `.env` has
+  none, are passed only to the processes the script starts.
+- To copy the online database's *actual* contents (including user-created reports) once Atlas access
+  works, use `mongodump --uri "<atlas uri>"` followed by
+  `mongorestore --uri "mongodb://127.0.0.1:27017/?replicaSet=rs0"`.
+
 ### 6. Run the Tests
 ```bash
 pip install -r requirements-dev.txt

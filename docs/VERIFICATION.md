@@ -83,11 +83,28 @@ loaded and mock providers on, and driven in a browser:
 
 The step-by-step script for a live demo is [DEMO.md](DEMO.md).
 
+## 4½. Real MongoDB (local replica set)
+
+`tests/test_local_mongo_integration.py` runs against a real MongoDB 9.0.2 single-node replica set
+(`python local_mongo.py up`, then `LOCAL_MONGO_URI=... python -m pytest tests/test_local_mongo_integration.py`).
+All **7 pass**:
+- transactions are detected;
+- a crash inside `run_atomically` leaves no writes, with MongoDB's own abort rather than the fallback;
+- a handover failure at the custody log, match or report step is rolled back by MongoDB itself, and a
+  retry then succeeds;
+- five concurrent pickup scans produce exactly one handover;
+- the full claim flow works on a real database.
+
+Without `LOCAL_MONGO_URI` these 7 tests are skipped, so the default suite stays database-free.
+
+The seed data is also reproducible. After `python local_mongo.py reset` (wipe and reseed from scratch),
+a fingerprint of every original setup collection was byte-identical: depots, stops, buses, routes,
+trips, drivers, conductors and schedules.
+
 ## 5. Not verified, and why
 
 | Item | Why |
 |---|---|
 | Running against the real Atlas database | credentials in `.env` are rejected (`bad auth`); needs a new `MONGO_URI` |
-| MongoDB multi-document transaction path (`with_transaction`) | needs a replica set. Atlas has one, but this machine has none (no local mongod; Docker daemon not running). The compensating-rollback path used on standalone servers is fully tested |
 | Live Twilio SMS/WhatsApp, Meta WhatsApp Cloud API, SMTP | adapters tested with fake transports only; Meta also needs an approved template for business-initiated messages |
 | Camera QR scanning in the browser | uses the browser's `BarcodeDetector`, which desktop Chrome on Windows lacks. USB/keyboard scanners and typed codes are the tested paths |

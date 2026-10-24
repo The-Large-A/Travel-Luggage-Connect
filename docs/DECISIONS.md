@@ -525,7 +525,9 @@ How atomicity is achieved:
 - **Concurrent scans.** Exactly one wins, because both the claim CAS and the item CAS must match.
 
 **Limitations.**
-- The transaction path could not be exercised locally (no replica set available).
+- The transaction path was later verified on a local MongoDB 9.0.2 replica set
+  (`tests/test_local_mongo_integration.py`): failures are aborted by MongoDB itself, and concurrent scans
+  still yield one handover.
 - In the fallback mode a concurrent reader could briefly observe a half-finished handover before
   it is rolled back. Real transactions do not have this window.
 

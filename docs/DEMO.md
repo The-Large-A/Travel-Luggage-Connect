@@ -15,6 +15,9 @@ messages appear in the app's console.
    EMAIL_PROVIDER=mock
    PASSENGER_COOKIE_SECURE=1    # fine on http://localhost / 127.0.0.1
    ```
+   **No Atlas access?** Run `python local_mongo.py up` and then `python local_mongo.py app` instead of
+   steps 2–3 below. That sets up a local MongoDB with the same seed data and prints the OTPs in the
+   terminal (see the README).
 2. Seed, in this order (each is idempotent):
    ```bash
    python seed_transport.py
