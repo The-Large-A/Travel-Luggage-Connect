@@ -315,3 +315,118 @@ def test_ttl_cleanup_indexes_exist(app, db):
         assert ttl and ttl[0]["key"] == [("purgeAt", 1)] and ttl[0]["expireAfterSeconds"] == 0, name
     unique = db.bookings.index_information()
     assert any(ix.get("unique") and ix["key"] == [("pnr", 1), ("passengerSeq", 1)] for ix in unique.values())
+
+
+# ── textbee SMS adapter (demo provider: an Android phone's SIM) ───────────────
+class _TextbeeResponse:
+    def __init__(self, status, payload=None, bad_json=False):
+        self.status_code, self._payload, self._bad_json = status, payload, bad_json
+
+    def json(self):
+        if self._bad_json:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _TextbeeSession:
+    def __init__(self, response=None, exc=None):
+        self.response, self.exc, self.calls = response, exc, []
+
+    def post(self, url, **kw):
+        self.calls.append((url, kw))
+        if self.exc:
+            raise self.exc
+        return self.response
+
+
+def _textbee(response=None, exc=None, **kw):
+    from passenger_auth.sms import TextbeeSmsProvider
+    session = _TextbeeSession(response, exc)
+    return TextbeeSmsProvider("tb-key-123", session=session, async_send=False, **kw), session
+
+
+def test_textbee_sends_documented_request():
+    ok = _TextbeeResponse(200, {"data": {"success": True, "smsBatchId": "b1", "recipientCount": 1}})
+    provider, session = _textbee(ok)
+    assert provider._send_now("+919876543210", "hello", "otp") is True
+    url, kw = session.calls[0]
+    assert url == "https://api.textbee.dev/api/v1/gateway/send-sms"
+    assert kw["headers"] == {"x-api-key": "tb-key-123"}
+    assert kw["json"] == {"recipients": ["+919876543210"], "message": "hello"}
+    assert kw["timeout"] == 10
+
+
+def test_textbee_device_and_self_hosted_base_url():
+    ok = _TextbeeResponse(200, {"data": {"success": True}})
+    provider, session = _textbee(ok, device_id="dev-42", base_url="http://localhost:3001/")
+    provider.send_otp("+919876543210", "482913", 300)
+    url, kw = session.calls[0]
+    assert url == "http://localhost:3001/api/v1/gateway/send-sms"
+    assert kw["json"]["deviceId"] == "dev-42" and kw["json"]["message"].startswith("482913 is your")
+
+
+@pytest.mark.parametrize("response,exc", [
+    (_TextbeeResponse(400, {"message": "no device"}), None),
+    (_TextbeeResponse(401, {"message": "bad key"}), None),
+    (_TextbeeResponse(429, {"message": "limit"}), None),
+    (_TextbeeResponse(500, None, bad_json=True), None),
+    (_TextbeeResponse(200, {"data": {"success": False}}), None),
+    (None, __import__("requests").ConnectionError()),
+    (None, __import__("requests").Timeout()),
+])
+def test_textbee_failures_are_logged_safely_and_never_raise(caplog, response, exc):
+    caplog.set_level(logging.INFO)
+    provider, _ = _textbee(response, exc)
+    provider.send_otp("+919876543210", "771100", 300)            # must not raise into the request path
+    assert "771100" not in caplog.text and "9876543210" not in caplog.text
+    assert "+91 ******3210" in caplog.text
+    assert provider._send_now("+919876543210", "x", "otp") is False
+
+
+def test_textbee_success_log_has_no_otp(caplog):
+    caplog.set_level(logging.INFO)
+    provider, _ = _textbee(_TextbeeResponse(200, {"data": {"success": True, "smsBatchId": "b9"}}))
+    provider.send_otp("+919876543210", "559900", 300)
+    assert "559900" not in caplog.text and "batch=b9" in caplog.text
+
+
+def test_textbee_sends_off_the_request_path(monkeypatch):
+    import threading
+    from passenger_auth.sms import TextbeeSmsProvider
+    started = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self))
+    provider = TextbeeSmsProvider("k", session=_TextbeeSession(_TextbeeResponse(200, {"data": {}})))
+    provider.send_otp("+919876543210", "123456", 300)
+    assert len(started) == 1 and started[0].daemon
+
+
+def test_textbee_selected_by_env(db):
+    from passenger_auth.sms import TextbeeSmsProvider
+    cfg = AuthConfig.from_env({"SIGNING_SECRET": TEST_SECRET, "SMS_PROVIDER": "textbee"})
+    provider = build_sms_provider(cfg, db, {"TEXTBEE_API_KEY": "k", "TEXTBEE_DEVICE_ID": "d1"})
+    assert isinstance(provider, TextbeeSmsProvider) and provider.name == "textbee"
+    assert provider.device_id == "d1" and provider.url.startswith("https://api.textbee.dev/")
+
+
+@pytest.mark.parametrize("env", [
+    {},                                                              # no API key
+    {"TEXTBEE_API_KEY": "k", "TEXTBEE_BASE_URL": "http://textbee.example.com"},   # plain http, not local
+    {"TEXTBEE_API_KEY": "k", "TEXTBEE_BASE_URL": "ftp://localhost"},
+])
+def test_textbee_config_errors(db, env):
+    cfg = AuthConfig.from_env({"SIGNING_SECRET": TEST_SECRET, "SMS_PROVIDER": "textbee"})
+    with pytest.raises(ConfigError):
+        build_sms_provider(cfg, db, env)
+
+
+def test_textbee_end_to_end_through_otp_request(db, clock):
+    """POST /auth/otp/request with SMS_PROVIDER=textbee reaches the phone gateway with the OTP."""
+    from conftest import build_app, make_config
+    from passenger_auth.sms import TextbeeSmsProvider
+    session = _TextbeeSession(_TextbeeResponse(200, {"data": {"success": True, "smsBatchId": "b1"}}))
+    provider = TextbeeSmsProvider("k", session=session, async_send=False)
+    client = build_app(db, clock, provider, make_config()).test_client()
+    assert client.post("/auth/otp/request", json={"pnr": "T26100101", "phone": "98765 43210"}).status_code == 202
+    (_, kw), = session.calls
+    assert kw["json"]["recipients"] == ["+919876543210"]
+    assert re.match(r"^\d{6} is your TNSTC Lost & Found verification code", kw["json"]["message"])

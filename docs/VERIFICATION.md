@@ -5,13 +5,13 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-**465 tests, all passing.** The suite needs no database or ML models. It runs on mongomock with
+**481 tests, all passing.** The suite needs no database or ML models. It runs on mongomock with
 a controllable clock and in-memory SMS/WhatsApp/email providers. The end-to-end tests drive the
 real `app.py` with only the ML models stubbed.
 
 | Area | Tests | Detail |
 |---|---|---|
-| Feature 1 — OTP passenger authentication | 165 | [VERIFICATION_F1.md](VERIFICATION_F1.md) |
+| Feature 1 — OTP passenger authentication (incl. SMS adapters) | 181 | [VERIFICATION_F1.md](VERIFICATION_F1.md) |
 | Feature 2 — Automatic match notification | 134 | [VERIFICATION_F2.md](VERIFICATION_F2.md) |
 | Feature 3 — Secure claims & QR pickup | 150 | [VERIFICATION_F3.md](VERIFICATION_F3.md) |
 | Pre-existing matcher scoring | 16 | `tests/test_scoring.py` (also runs standalone) |

@@ -180,6 +180,26 @@ commit 934a23f). Startup fails if its credentials are missing. It has been unit-
 fake client but not against a live Twilio account. `send_message()` is available for
 Feature 2 notifications.
 
+### F1-22 · textbee as the free demo SMS provider
+Twilio's free trial ran out too soon for the project, and production Indian SMS providers (MSG91,
+VerifyNow and others) need TRAI DLT registration, which costs ₹5,000 + GST and requires a registered
+company. `SMS_PROVIDER=textbee` sends real SMS from an Android phone's SIM through textbee
+(MIT-licensed, hosted or self-hosted): `POST {TEXTBEE_BASE_URL}/api/v1/gateway/send-sms` with an
+`x-api-key` header and `{recipients, message, deviceId?}`, as in textbee's published OpenAPI spec.
+
+It follows the Twilio adapter's rules:
+- it sends on a background thread, so response time does not reveal whether a PNR exists;
+- provider errors are logged but never reach the passenger;
+- logs contain only the masked phone, the HTTP status and a fixed hint, never the message body or
+  provider text;
+- `TEXTBEE_BASE_URL` must be https, except for localhost when self-hosting.
+
+A 200 response means the phone accepted the message, not that it was delivered.
+
+**Demo only.** SMS from a personal SIM is limited by the carrier's SMS pack and is not appropriate for
+a public government service. In production, TNSTC would use a DLT-registered provider such as MSG91
+through the same `SmsProvider` interface.
+
 ### F1-19 · `SIGNING_SECRET` missing
 If it is unset, a random per-process secret is generated with a loud warning, rather than
 falling back to a guessable constant like the existing `SECRET_KEY` default. Sessions and

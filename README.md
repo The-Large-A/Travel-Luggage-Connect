@@ -172,6 +172,16 @@ collection with the OTP masked. For local testing only, set `SMS_MOCK_EXPOSE_OTP
 real code there. `SMS_PROVIDER=twilio` sends real SMS with `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN` and `TWILIO_SMS_FROM` (falls back to `TWILIO_PHONE_NUMBER`).
 
+**Free real SMS for demos: `SMS_PROVIDER=textbee`.** [textbee](https://textbee.dev) sends SMS from an
+Android phone's own SIM, so there is no per-message fee beyond your SMS pack and no DLT paperwork for a
+small demo. Its hosted free tier has a monthly limit, and textbee is MIT-licensed if you prefer to
+self-host. To set it up:
+1. Install the textbee app on an Android phone with a SIM that can send SMS.
+2. In the textbee dashboard, click *Add device*, scan the QR code with the app and copy the API key.
+3. Set `SMS_PROVIDER=textbee` and `TEXTBEE_API_KEY=…` in `.env`. `TEXTBEE_DEVICE_ID` is optional.
+
+This is meant for demos and testing. For production, use a DLT-registered Indian SMS provider.
+
 ### Sample PNRs (from `seed_bookings.py`)
 | PNR | Mobile | Case |
 |---|---|---|

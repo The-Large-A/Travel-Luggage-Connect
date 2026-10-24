@@ -112,6 +112,23 @@ messages appear in the app's console.
 - **Expired token.** Arun's TRK-DEMO0009 laptop claim expired after 7 days. The laptop is back
   to `open`.
 
+## 3½. Optional: real SMS on stage (textbee)
+
+To have the OTP and claim texts arrive on a real phone instead of the console:
+1. Install textbee on a spare Android phone with an active SIM and SMS pack, and grant the SMS
+   permissions.
+2. At textbee.dev click **Add device**, scan the QR code with the app and copy the API key.
+3. In `.env` set `SMS_PROVIDER=textbee`, `TEXTBEE_API_KEY=<key>` and `SMS_MOCK_EXPOSE_OTP=0`,
+   then restart the app.
+4. Point a demo booking at your own number, for example in `mongosh`:
+   `db.bookings.updateOne({pnr: "T26100102"}, {$set: {registeredPhone: "+91XXXXXXXXXX"}})`.
+   The OTP only ever goes to the number registered on the booking.
+5. Log in with that PNR. The OTP arrives as an SMS from the demo phone's number. The console shows
+   `textbee SMS (otp) accepted for +91 ******…`, never the code.
+
+If nothing arrives, check that the phone is online and the textbee app is running. The console names
+the problem: HTTP 400 means no enabled device, 401 a bad API key, 429 a plan limit.
+
 ## 4. Proof that it is tested
 
 ```bash

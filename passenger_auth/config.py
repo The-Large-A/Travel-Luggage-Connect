@@ -88,8 +88,8 @@ class AuthConfig:
             raise ConfigError("SIGNING_SECRET must be at least 32 characters long.")
 
         sms_provider = (env.get("SMS_PROVIDER") or "mock").strip().lower()
-        if sms_provider not in ("mock", "twilio"):
-            raise ConfigError(f"SMS_PROVIDER must be 'mock' or 'twilio', got {sms_provider!r}")
+        if sms_provider not in ("mock", "twilio", "textbee"):
+            raise ConfigError(f"SMS_PROVIDER must be 'mock', 'twilio' or 'textbee', got {sms_provider!r}")
 
         samesite = (env.get("PASSENGER_COOKIE_SAMESITE") or "Lax").strip().capitalize()
         if samesite not in ("Lax", "Strict", "None"):
