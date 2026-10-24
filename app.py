@@ -28,6 +28,7 @@ from similarity import (
 )
 from notifications import notification_service
 import transport_schema as T
+from passenger_auth import init_passenger_auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,6 +79,10 @@ def ensure_indexes():
 
 
 ensure_indexes()
+
+# Feature 1: OTP-based passenger authentication (/auth/* API, /passenger pages,
+# and the require_passenger guard used by passenger-facing features).
+init_passenger_auth(app, db)
 
 # AI Models
 logger.info("Initialising AI models...")

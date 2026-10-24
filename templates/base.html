@@ -118,6 +118,12 @@
                         </svg>
                         Check Status
                     </a>
+                    {% set pax = nav_passenger() if nav_passenger is defined else None %}
+                    {% if pax %}
+                    <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-tn-blue hover:underline font-semibold text-sm uppercase tracking-wide">{{ pax.passenger_name }}</a>
+                    {% elif nav_passenger is defined %}
+                    <a href="{{ url_for('passenger_auth.login_page') }}" class="text-slate-600 hover:text-tn-blue font-semibold text-sm uppercase tracking-wide transition-colors">Passenger Login</a>
+                    {% endif %}
                     <a href="{{ url_for('depot_login_page') }}" class="btn-gov-primary text-xs uppercase tracking-widest px-4">Depot Staff Login</a>
                 </div>
                 {% endif %}
