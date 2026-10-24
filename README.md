@@ -22,6 +22,7 @@ In traditional transport systems, lost items are recorded in manual registers, l
 - [x] **AI Matching Engine**: Integrated `SentenceTransformer` (`all-MiniLM-L6-v2`) for semantic text similarity.
 - [x] **Authentication**: Secure depot-specific login system.
 - [x] **Passenger OTP Login (Feature 1)**: PNR + registered-mobile verification with a one-time password before Lost & Found access (see below).
+- [x] **Automatic Match Notification (Feature 2)**: confidence-routed WhatsApp/email alerts with staff review, retries, fallback and a 7-day hold (see below).
 
 ### **Frontend & UI**
 - [x] **Passenger Portal**: Dynamic forms with real-time stop suggestions based on selected routes.
@@ -92,6 +93,7 @@ passenger bookings (PNRs) used by passenger login:
 ```bash
 python seed_transport.py
 python seed_bookings.py
+python seed_matches.py      # optional: Feature 2 demo matches
 ```
 
 ### 5. Start Application
@@ -179,6 +181,81 @@ real code there. `SMS_PROVIDER=twilio` sends real SMS with `TWILIO_ACCOUNT_SID`,
 
 Design decisions are recorded in [`docs/DECISIONS.md`](docs/DECISIONS.md), and the
 rule-to-test mapping is in [`docs/VERIFICATION_F1.md`](docs/VERIFICATION_F1.md).
+
+---
+
+## 🔔 Automatic Match Notification (Feature 2)
+
+When the matcher pairs a lost report with a found item, passengers are notified automatically,
+on WhatsApp first and then by email, through a privacy-safe message. Medium-confidence matches
+wait for depot staff to approve them first.
+
+### Flow
+1. A passenger logs in (Feature 1) and files a lost report. The report is now **owned** by the
+   verified PNR + phone, so only that passenger can see it.
+2. The existing matcher runs in **both directions**: a new or updated report against logged
+   items, and a newly logged item against older open reports.
+3. Each pair is routed by confidence:
+
+   | Confidence | Result |
+   |---|---|
+   | ≥ 0.85 (`MATCH_AUTO_NOTIFY_MIN`) | notified automatically |
+   | 0.60 – 0.85 (`MATCH_REVIEW_MIN`) | **staff review** at `/staff/review`; nothing is sent before approval |
+   | < 0.60 | rejected, never sent |
+
+4. A background worker sends the message. If WhatsApp fails it retries with exponential backoff,
+   then falls back to email. If every channel fails, staff see it in the delivery table and can
+   retry. The passenger always gets an in-app notification.
+5. The message links to `/passenger/reports/<TrackingID>`, which requires the Feature 1 login.
+   The match page shows the depot, the depot's short public description, the date found (IST),
+   the confidence and a **7-day hold** countdown, plus the "Start claim" button that Feature 3
+   will enable.
+6. After 7 days the hold is released and the passenger sees **expired**.
+
+**What a message never contains:** photos, the depot's private notes, contents, serial numbers
+or any hint of other passengers' reports. Depot staff now enter a short **public description**
+(e.g. "Black backpack") separately from their **private notes**. The public text is also
+sanitized and redacted automatically.
+
+### API
+Passenger (Feature 1 session; anything not yours is a 404):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /reports` | my lost reports |
+| `PATCH /reports/<trackingId>` `{"description"}` | update an open report (re-runs matching) |
+| `POST /reports/<trackingId>/cancel` | cancel an open report |
+| `GET /reports/<trackingId>/matches` | privacy-safe matches for my report |
+| `GET /matches/<matchId>` | one privacy-safe match (state, %, depot, description, date found, hold) |
+| `GET /notifications` | my in-app notifications |
+
+Staff (depot login; scoped to your depot; 401 when logged out, 403 for passengers):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /staff/matches?status=staff_review` | review queue (any match status accepted) |
+| `POST /staff/matches/<id>/approve` · `/reject` | decide a review-band match (409 if already decided) |
+| `GET /staff/notifications?status=failed` | delivery status, failures and errors |
+| `POST /staff/notifications/<id>/retry` | retry a failed channel (409 if the passenger was already reached) |
+| `POST /staff/matcher/rerun` `{}` or `{"itemId"}` | safely re-run the matcher for your open items |
+
+Pages: `/passenger/reports/<id>`, `/passenger/matches/<id>`, `/passenger/notifications`,
+`/staff/review`.
+
+### Operations
+```bash
+python seed_matches.py                     # demo data (needs seed_bookings.py first)
+python manage_matches.py run-jobs          # send due notifications once
+python manage_matches.py release-expired   # release expired holds
+python manage_matches.py rerun --report TRK-XXXXXXXX   # or --item <id> / --all-open
+```
+All of these are idempotent and safe while the app runs. The demo depot login for
+`/staff/review` is phone `9000000101`, password `demo123`. Settings are listed in
+`.env.example`. Set `MOCK_WHATSAPP_FAILURE=transient` to watch retries and the email fallback
+locally.
+
+Design decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) (F2-01 … F2-14). Rule-to-test map:
+[`docs/VERIFICATION_F2.md`](docs/VERIFICATION_F2.md).
 
 ---
 

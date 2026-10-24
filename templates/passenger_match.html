@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}Match for {{ match.reportId }} - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[700px] mx-auto space-y-6">
+    <a href="{{ url_for('match_notify.report_page', tracking_id=match.reportId) }}" class="text-xs font-bold text-slate-500 uppercase hover:text-tn-blue">&larr; Report {{ match.reportId }}</a>
+
+    <div class="card-professional overflow-hidden" id="match-card" data-state="{{ match.state }}">
+        <div class="p-5 text-white {% if match.state == 'active' %}bg-green-700{% elif match.state == 'expired' %}bg-slate-500{% else %}bg-tn-blue{% endif %}">
+            <p class="text-xs uppercase tracking-widest opacity-80 font-bold">Potential match</p>
+            <p class="text-xl font-heading font-bold">
+                {% if match.state == 'active' %}Match found - held for you
+                {% elif match.state == 'expired' %}Hold expired
+                {% elif match.state == 'claim_started' %}Claim in progress
+                {% elif match.state == 'confirmed' %}Confirmed by the depot
+                {% else %}No longer available{% endif %}
+            </p>
+        </div>
+        <div class="p-6 grid sm:grid-cols-2 gap-6 text-sm">
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Match confidence</p>
+                <p class="font-bold text-slate-800 text-lg">{{ match.confidencePercent }}%</p>
+            </div>
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Found at</p>
+                <p class="font-bold text-slate-800">{{ match.foundAt }}</p>
+            </div>
+            <div class="sm:col-span-2">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Item description (depot)</p>
+                <p class="text-slate-700 italic border-l-4 border-slate-200 pl-3">"{{ match.itemDescription }}"</p>
+            </div>
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Date found</p>
+                <p class="font-bold text-slate-800 mono">{{ match.dateFound }} IST</p>
+            </div>
+            <div>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Hold</p>
+                {% if match.state == 'active' and match.holdExpiresAtIst %}
+                <p class="font-bold text-slate-800">Until {{ match.holdExpiresAtIst }}</p>
+                <p class="text-xs text-slate-500"><span id="hold-countdown" class="mono"></span> left</p>
+                {% elif match.state == 'active' %}
+                <p class="text-slate-600">Starts once your notification is delivered.</p>
+                {% elif match.state == 'expired' %}
+                <p id="hold-expired" class="font-bold text-tn-red">Expired{% if match.holdExpiresAtIst %} on {{ match.holdExpiresAtIst }}{% endif %}. The item has been released.</p>
+                {% else %}
+                <p class="text-slate-600">—</p>
+                {% endif %}
+            </div>
+        </div>
+        <div class="px-6 pb-6 space-y-2">
+            <button id="start-claim-btn" type="button" data-match-id="{{ match.matchId }}"
+                    class="w-full btn-gov-primary text-sm uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled aria-disabled="true">
+                Start claim / உரிமை கோருக
+            </button>
+            {% if match.claim.canStart %}
+            <p class="text-xs text-slate-500">To collect the item now, visit {{ match.foundAt }} with report ID <span class="mono font-bold">{{ match.reportId }}</span> and a photo ID before the hold ends.</p>
+            {% endif %}
+        </div>
+    </div>
+    <p class="text-[11px] text-slate-400">For your safety we never show photos or private details of found items online. The depot verifies ownership in person.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if match.state == 'active' and match.holdSecondsRemaining is not none %}
+<script>
+(() => {
+    const end = performance.now() + {{ match.holdSecondsRemaining | int }} * 1000;
+    const el = document.getElementById('hold-countdown');
+    function render() {
+        let s = Math.max(0, Math.ceil((end - performance.now()) / 1000));
+        if (s === 0) { window.location.reload(); return; }
+        const d = Math.floor(s / 86400); s %= 86400;
+        const h = Math.floor(s / 3600); s %= 3600;
+        const m = Math.floor(s / 60);
+        el.textContent = `${d}d ${h}h ${m}m`;
+    }
+    render();
+    setInterval(render, 30000);
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -129,10 +129,12 @@ def require_passenger(view=None, *, page=False):
             except SessionError as e:
                 code, message = SESSION_MESSAGES[e.reason]
                 if page:
-                    query = {"next": request.full_path.rstrip("?")}
+                    # Only a GET can be replayed after login; a form POST lands on the home page.
+                    query = {"next": request.full_path.rstrip("?")} if request.method == "GET" else {}
                     if e.reason in ("expired", "revoked", "invalid"):
                         query["reason"] = "expired"
-                    resp = redirect(f"{url_for('passenger_auth.login_page')}?{urlencode(query)}")
+                    login_url = url_for('passenger_auth.login_page')
+                    resp = redirect(f"{login_url}?{urlencode(query)}" if query else login_url)
                     if e.reason != "missing":
                         _state().sessions.clear_cookie(resp)
                     return resp

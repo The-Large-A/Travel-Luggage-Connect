@@ -175,3 +175,140 @@ def flow(client, sms, clock):
 
 def wrong_otp(correct: str) -> str:
     return f"{(int(correct) + 1) % 1_000_000:06d}"
+
+
+# ── Feature 2 (match notification) fixtures ──────────────────────────────────
+from match_notify import init_match_notify                              # noqa: E402
+from match_notify.channels import EMAIL, WHATSAPP, ChannelError, MessageChannel  # noqa: E402
+from match_notify.config import MatchNotifyConfig                       # noqa: E402
+from passenger_auth.phone import normalize_phone                        # noqa: E402
+
+DEPOT_A = {"phone": "9000000101", "name": "Chennai CMBT Depot", "password": "x", "city": "Chennai"}
+DEPOT_B = {"phone": "9000000202", "name": "Madurai Mattuthavani Depot", "password": "x", "city": "Madurai"}
+
+
+class RecordingChannel(MessageChannel):
+    """Records deliveries; `plan` scripts outcomes per call: 'ok' | 'transient' | 'permanent'."""
+
+    def __init__(self, channel):
+        self.channel = channel
+        self.name = "recording"
+        self.sent = []
+        self.calls = 0
+        self.plan = []
+        self.default = "ok"
+        self._lock = threading.Lock()
+
+    def send(self, to, message):
+        with self._lock:
+            self.calls += 1
+            outcome = self.plan.pop(0) if self.plan else self.default
+        if outcome == "transient":
+            raise ChannelError("simulated provider outage")
+        if outcome == "permanent":
+            raise ChannelError("simulated invalid recipient", permanent=True)
+        with self._lock:
+            self.sent.append({"to": to, "subject": message.subject, "text": message.text,
+                              "html": message.html})
+        return f"ref-{len(self.sent)}"
+
+
+def make_f2_config(**overrides):
+    base = dict(worker_enabled=False, app_base_url="https://lostfound.tnstc.example")
+    base.update(overrides)
+    return MatchNotifyConfig(**base)
+
+
+def score_of(final):
+    return {"text": final, "image": 0.0, "route": 1.0, "ocr": 0.0, "structured": 0.0,
+            "final": final, "is_match": final >= 0.30}
+
+
+class FakeMatcher:
+    """Stands in for app.py's matcher in the staff re-run / report-update paths."""
+
+    def __init__(self, db):
+        self.db = db
+        self.scores = {}
+        self.service = None
+
+    def rematch_lost(self, lost):
+        for found in self.db.found_reports.find():
+            final = self.scores.get((lost["request_id"], found["found_id"]))
+            if final is not None:
+                self.service.record_match(found, lost, score_of(final))
+
+    def rematch_found(self, found):
+        for lost in self.db.lost_reports.find({"status": {"$ne": "resolved"}}):
+            final = self.scores.get((lost["request_id"], found["found_id"]))
+            if final is not None:
+                self.service.record_match(found, lost, score_of(final))
+
+
+class F2:
+    """Everything a Feature 2 test needs, with readable helpers."""
+
+    def __init__(self, db, clock, sms, config=None, csrf=False):
+        self.db, self.clock, self.sms = db, clock, sms
+        self.channels = {WHATSAPP: RecordingChannel(WHATSAPP), EMAIL: RecordingChannel(EMAIL)}
+        self.matcher = FakeMatcher(db)
+        self.app = build_app(db, clock, sms, csrf=csrf)
+        self.app.add_url_rule("/depot", "depot_dashboard", lambda: "stub")
+        self.state = init_match_notify(self.app, db, config=config or make_f2_config(),
+                                       channels=self.channels, clock=clock,
+                                       rematch_lost=self.matcher.rematch_lost,
+                                       rematch_found=self.matcher.rematch_found)
+        self.svc = self.state.service
+        self.matcher.service = self.svc
+        for depot in (DEPOT_A, DEPOT_B):
+            db.depots.insert_one(dict(depot))
+        self.client = self.app.test_client()
+
+    # data
+    def lost(self, ident, tracking="TRK-AAAA0001", description="Black backpack", owned=True, **extra):
+        doc = {"request_id": f"req-{tracking}", "tracking_id": tracking, "route_id": "r1",
+               "route_name": "Chennai → Coimbatore", "date": "2026-10-20", "description": description,
+               "name": "Arun Kumar", "phone": normalize_phone(ident["phone"]), "status": "pending",
+               "created_at": "2026-10-20T10:00:00"}
+        if owned:
+            doc.update(ownerPnr=ident["pnr"], ownerPhone=normalize_phone(ident["phone"]))
+        doc.update(extra)
+        self.db.lost_reports.insert_one(doc)
+        return self.db.lost_reports.find_one({"tracking_id": tracking})
+
+    def found(self, found_id="item-1", depot=DEPOT_A, public="Black backpack",
+              notes="Black backpack, Dell laptop SN 7X2K9Q", date="2026-10-21", **extra):
+        doc = {"found_id": found_id, "depot_phone": depot["phone"], "depot_name": depot["name"],
+               "route_id": "r1", "date": date, "notes": notes, "public_description": public,
+               "status": "open", "created_at": "2026-10-21T09:00:00"}
+        doc.update(extra)
+        self.db.found_reports.insert_one(doc)
+        return self.db.found_reports.find_one({"found_id": found_id})
+
+    def match(self, lost, found, final):
+        return self.svc.record_match(found, lost, score_of(final))
+
+    def run_jobs(self):
+        return self.svc.process_due_notifications("test-worker")
+
+    def notifications(self, **query):
+        return list(self.db.notifications.find(query))
+
+    # actors
+    def login_passenger(self, ident, client=None):
+        client = client or self.client
+        flow = AuthFlow(client, self.sms, self.clock)
+        flow.login(ident)
+        return client
+
+    def staff_client(self, depot=DEPOT_A):
+        client = self.app.test_client()
+        with client.session_transaction() as s:
+            s["depot_phone"] = depot["phone"]
+            s["depot_name"] = depot["name"]
+        return client
+
+
+@pytest.fixture
+def f2(db, clock, sms):
+    return F2(db, clock, sms)

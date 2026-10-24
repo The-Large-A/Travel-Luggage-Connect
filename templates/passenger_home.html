@@ -41,6 +41,15 @@
         </div>
     </div>
 
+    <div id="my-reports" class="card-professional p-6 hidden">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-heading font-bold text-slate-800 uppercase tracking-wide">My reports</h2>
+            <a href="/passenger/notifications" class="text-xs font-bold text-tn-blue uppercase hover:underline">Notifications</a>
+        </div>
+        <ul id="my-reports-list" class="space-y-2"></ul>
+        <p id="my-reports-empty" class="hidden text-sm text-slate-500">You have not filed a lost report yet.</p>
+    </div>
+
     <div class="grid sm:grid-cols-2 gap-4">
         <a href="{{ url_for('index') }}" class="card-professional p-6 hover:border-tn-blue transition-colors">
             <p class="font-heading font-bold text-slate-800 uppercase">Report a lost item</p>
@@ -85,6 +94,33 @@
             if (resp.status === 401 || resp.status === 403) window.location.assign(LOGIN_EXPIRED);
         } catch (e) { /* offline: the local countdown still enforces expiry */ }
     }, 60000);
+
+    // My reports (Feature 2). Values are untrusted: rendered with textContent only.
+    (async () => {
+        try {
+            const resp = await fetch('/reports', { credentials: 'same-origin' });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const list = document.getElementById('my-reports-list');
+            for (const r of data.reports) {
+                const li = document.createElement('li');
+                const a = document.createElement('a');
+                a.href = '/passenger/reports/' + encodeURIComponent(r.trackingId);
+                a.className = 'flex items-center justify-between p-3 rounded-md border border-slate-200 hover:border-tn-blue';
+                const left = document.createElement('span');
+                left.className = 'mono font-bold text-slate-800';
+                left.textContent = r.trackingId;
+                const right = document.createElement('span');
+                right.className = 'text-[10px] font-bold uppercase text-slate-500';
+                right.textContent = r.status;
+                a.append(left, right);
+                li.append(a);
+                list.append(li);
+            }
+            document.getElementById('my-reports-empty').classList.toggle('hidden', data.reports.length > 0);
+            document.getElementById('my-reports').classList.remove('hidden');
+        } catch (e) { /* the rest of the page works without the list */ }
+    })();
 
     document.getElementById('logout-btn').addEventListener('click', async () => {
         try {

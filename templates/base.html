@@ -105,6 +105,8 @@
                         <span class="text-slate-700 font-bold text-sm">{{ session.get('depot_name') }}</span>
                         <span class="text-[10px] text-tn-blue uppercase font-bold tracking-widest">Authorized Staff</span>
                     </div>
+                    <a href="{{ url_for('match_notify.staff_review_page') }}" class="text-slate-600 hover:text-tn-blue font-bold text-sm uppercase">Match Review</a>
+                    <a href="{{ url_for('depot_dashboard') }}" class="text-slate-600 hover:text-tn-blue font-bold text-sm uppercase">Dashboard</a>
                     <a href="{{ url_for('depot_logout') }}" class="text-tn-red hover:underline font-bold text-sm uppercase">Logout</a>
                 </div>
                 {% else %}

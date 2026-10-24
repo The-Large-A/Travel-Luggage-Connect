@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import requests
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, flash, jsonify
+    redirect, url_for, session, flash, jsonify, g
 )
 from werkzeug.utils import secure_filename
 from flask_wtf.csrf import CSRFProtect
@@ -28,7 +28,8 @@ from similarity import (
 )
 from notifications import notification_service
 import transport_schema as T
-from passenger_auth import init_passenger_auth
+from passenger_auth import init_passenger_auth, require_passenger
+from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -83,6 +84,16 @@ ensure_indexes()
 # Feature 1: OTP-based passenger authentication (/auth/* API, /passenger pages,
 # and the require_passenger guard used by passenger-facing features).
 init_passenger_auth(app, db)
+
+# Feature 2: automatic match notification. The matcher below calls
+# match_notifier.record_match(); sending runs on a background worker. Staff
+# re-runs reuse the two existing matching directions.
+match_notifier = init_match_notify(
+    app, db,
+    rematch_lost=lambda lost: compute_matches_for_lost(lost),
+    rematch_found=lambda found: compute_and_save_matches(
+        found, depots_collection.find_one({"phone": found.get("depot_phone")}) or {}),
+).service
 
 # AI Models
 logger.info("Initialising AI models...")
@@ -404,37 +415,13 @@ def score_lost_found(found_report: dict, lost: dict, depot: dict):
 
 def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
     """
-    Upsert a match (unique on found_id+request_id), advance the lost report to
-    'matched', and send the high-confidence WhatsApp alert AT MOST ONCE — only
-    when a NEW match document is actually inserted (idempotent notifications).
-    Returns True if a new match was created.
+    Persist a qualifying (found, lost) pair through Feature 2, which upserts the
+    match (unique on reportId+itemId), routes it by confidence (auto-notify /
+    staff review / reject) and queues privacy-safe notifications on the
+    background worker. Duplicate triggers are no-ops. Returns True if a new match
+    document was created.
     """
-    result = matches_collection.update_one(
-        {"found_id": found_report["found_id"], "request_id": lost["request_id"]},
-        {"$setOnInsert": {
-            "found_id":    found_report["found_id"],
-            "request_id":  lost["request_id"],
-            "depot_phone": found_report["depot_phone"],
-            "depot_name":  found_report["depot_name"],
-            "score":       score,
-            "status":      "pending",   # pending → resolved
-            "created_at":  datetime.now().isoformat(),
-        }},
-        upsert=True
-    )
-    is_new = result.upserted_id is not None
-
-    # Advance the timeline to step 2 — only for still-pending reports.
-    lost_collection.update_one(
-        {"request_id": lost["request_id"], "status": "pending"},
-        {"$set": {"status": "matched"}}
-    )
-
-    if is_new and score["final"] >= 0.80 and lost.get("phone"):
-        msg = (f"TNSTC Alert: A highly likely match for your lost item was found at "
-               f"{found_report['depot_name']}. Please check the portal with your "
-               f"Tracking ID: {lost['tracking_id']}.")
-        notification_service.send_whatsapp_async(lost["phone"], msg)
+    _, is_new = match_notifier.record_match(found_report, lost, score)
     return is_new
 
 
@@ -494,7 +481,7 @@ def get_matches_for_depot(depot_phone: str) -> list:
     # Fetch only pending matches belonging to this depot
     raw_matches = list(matches_collection.find({
         "depot_phone": depot_phone,
-        "status":      {"$ne": "resolved"}
+        "status":      {"$in": list(MATCH_ACTIVE_STATUSES)}
     }).sort("created_at", -1))
 
     if not raw_matches:
@@ -527,6 +514,7 @@ def get_matches_for_depot(depot_phone: str) -> list:
         enriched_lost = dict(lost)
         enriched_lost["score"]    = match["score"]
         enriched_lost["match_id"] = str(match["_id"])
+        enriched_lost["match_status"] = match.get("status")
 
         if fid not in groups:
             groups[fid] = {
@@ -553,8 +541,14 @@ def index():
 
 
 @app.route('/lost', methods=['POST'])
+@require_passenger(page=True)
 def submit_lost():
-    """Accept a lost luggage report from a passenger."""
+    """
+    Accept a lost luggage report from an OTP-verified passenger (Feature 1).
+    The report is owned by the session's (pnr, phone); name and phone come from
+    the verified session, never from the form.
+    """
+    passenger = g.passenger
     route_id          = request.form.get('route_id')
     trip_id           = request.form.get('trip_id')
     seat_no           = request.form.get('seat_no')
@@ -562,8 +556,8 @@ def submit_lost():
     alighting_stop_id = request.form.get('alighting_stop_id')
     date              = request.form.get('date')
     description       = request.form.get('description')
-    phone             = request.form.get('phone')
-    name              = request.form.get('name')
+    phone             = passenger.phone
+    name              = passenger.passenger_name
     image_file        = request.files.get('image')
 
     if not all([route_id, trip_id, seat_no, boarding_stop_id,
@@ -637,8 +631,10 @@ def submit_lost():
         "description":       description,
         "phone":             phone,
         "name":              name,
+        "ownerPnr":          passenger.pnr,     # object-level authorization (Feature 2)
+        "ownerPhone":        passenger.phone,
         "image_path":        image_path,
-        "status":            "pending",     # pending | resolved
+        "status":            "pending",     # pending | matched | resolved | cancelled
         "matched_depot":     None,
         "matched_at":        None,
         "created_at":        datetime.now().isoformat()
@@ -647,12 +643,11 @@ def submit_lost():
     lost_collection.insert_one(report)
 
     # Symmetric matching: check against found items already logged on this route.
-    n = compute_matches_for_lost(report)
+    # The count is not shown: review-band matches must stay invisible until approved.
+    compute_matches_for_lost(report)
 
     msg = (f'Report submitted! Your Tracking ID is {tracking_id} — '
-           f'save it to check your claim status.')
-    if n:
-        msg += f' We already found {n} possible match(es); a depot may contact you soon.'
+           f'save it to check your claim status. We will notify you if a depot finds a likely match.')
     flash(msg, 'success')
     session['last_tracking_id'] = tracking_id
     return redirect(url_for('index'))
@@ -746,9 +741,10 @@ def submit_found():
     trip_id         = request.form.get('trip_id') or None
     date            = request.form.get('date')
     notes           = request.form.get('notes')
+    public_description = (request.form.get('public_description') or '').strip()
     found_seat_area = request.form.get('found_seat_area') or None
 
-    if not all([route_id, date, notes]):
+    if not all([route_id, date, notes, public_description]):
         flash('Please fill in all required fields.', 'error')
         return redirect(url_for('depot_dashboard'))
 
@@ -813,7 +809,8 @@ def submit_found():
         "departure_time":  trip.get("departure_time") if trip else None,
         "found_seat_area": found_seat_area,
         "date":            date,
-        "notes":           notes,
+        "notes":           notes,             # private: staff only
+        "public_description": public_description[:120],   # the only text passengers see
         "image_path":      image_path,
         "ocr_text":        ocr_text,          # cached; reused by the matcher
         "status":          "open",
@@ -1131,6 +1128,9 @@ def resolve_match():
         return jsonify({"success": False, "message": "Match not found."}), 404
     if match.get("status") == "resolved":
         return jsonify({"success": False, "message": "Match already resolved."}), 409
+    if match.get("status") not in MATCH_ACTIVE_STATUSES:
+        return jsonify({"success": False,
+                        "message": f"Match is {match.get('status')} and can no longer be resolved."}), 409
 
     request_id = match["request_id"]   # trusted: comes from the match document
 
@@ -1155,11 +1155,10 @@ def resolve_match():
         }}
     )
 
-    # Step 3: Cancel all other pending matches for this passenger
-    matches_collection.update_many(
-        {"request_id": request_id, "status": "pending"},
-        {"$set": {"status": "cancelled"}}
-    )
+    # Step 3: The item is now reserved for this report — end every competing match
+    # (other reports on this item, other items on this report) and their queued
+    # notifications.
+    match_notifier.on_match_resolved(oid)
     # Step 4: Send WhatsApp notification to the passenger
     lost_report = lost_collection.find_one({"request_id": request_id})
     if lost_report and lost_report.get("phone"):

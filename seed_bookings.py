@@ -16,6 +16,9 @@ Sample PNRs (all phones are fictitious):
                Meena Senthil       +91 91234 56780    (same phone as Senthil)
                Ravi Senthil        +91 80987 65432    (own phone)
     T26100106  Kavitha Mani        +91 70102 03040  completed, 120 days ago → outside window
+
+Contact preferences (Feature 2): Arun has WhatsApp + email, Priya has email only,
+Ravi Senthil has neither (in-app notifications only), everyone else WhatsApp only.
 """
 import os
 from datetime import timedelta
@@ -40,6 +43,14 @@ SAMPLE_BOOKINGS = [
     ("T26100106", 1, "Kavitha Mani",        "7010203040",       "completed", "SETC 101 Chennai → Coimbatore", 120),
 ]
 
+# Contact preferences used by Feature 2 notifications: (pnr, seq) → (on WhatsApp?, email).
+# Unlisted passengers: registered phone is on WhatsApp, no email.
+CONTACTS = {
+    ("T26100101", 1): (True, "arun.kumar@example.com"),
+    ("T26100102", 1): (False, "priya.raman@example.com"),    # email only
+    ("T26100105", 3): (False, None),                        # no WhatsApp, no email → in-app only
+}
+
 BOOKINGS_VALIDATOR = {
     "$jsonSchema": {
         "bsonType": "object",
@@ -52,6 +63,8 @@ BOOKINGS_VALIDATOR = {
             "status":          {"enum": ["confirmed", "completed", "cancelled"]},
             "route":           {"bsonType": "string"},
             "travelDate":      {"bsonType": "string"},
+            "whatsapp":        {"bsonType": "bool"},
+            "email":           {"bsonType": ["string", "null"]},
         },
     }
 }
@@ -62,6 +75,7 @@ def seed_bookings(db, now=None) -> int:
     now = now or utcnow()
     today = today_ist(now)
     for pnr, seq, name, phone, status, route, days_ago in SAMPLE_BOOKINGS:
+        whatsapp, email = CONTACTS.get((pnr, seq), (True, None))
         db[BOOKINGS].update_one(
             {"pnr": pnr, "passengerSeq": seq},
             {"$set": {
@@ -70,6 +84,8 @@ def seed_bookings(db, now=None) -> int:
                 "status":          status,
                 "route":           route,
                 "travelDate":      (today - timedelta(days=days_ago)).isoformat(),
+                "whatsapp":        whatsapp,
+                "email":           email,
                 "updatedAt":       to_db(now),
             }, "$setOnInsert": {"createdAt": to_db(now)}},
             upsert=True,

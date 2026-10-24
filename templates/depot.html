@@ -84,10 +84,20 @@
                     </div>
 
                     <div class="space-y-1.5">
-                        <label class="block text-sm font-bold text-slate-700">Description / விவரம்</label>
+                        <label class="block text-sm font-bold text-slate-700">
+                            Public description / பொது விவரம் <span class="text-tn-red">*</span>
+                        </label>
+                        <input type="text" name="public_description" required maxlength="80"
+                               class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium input-focus"
+                               placeholder="Short, generic: e.g. Black backpack">
+                        <p class="text-[11px] text-slate-500">Sent to matched passengers. Never include contents, serial numbers, names or ID numbers.</p>
+                    </div>
+
+                    <div class="space-y-1.5">
+                        <label class="block text-sm font-bold text-slate-700">Private notes (staff only) / விவரம்</label>
                         <textarea name="notes" required rows="2"
                                   class="w-full p-3 border border-slate-300 rounded-md font-medium input-focus resize-none"
-                                  placeholder="Describe the found item (e.g. Blue handbag with laptop inside)"></textarea>
+                                  placeholder="Full details used for matching (e.g. Blue handbag with laptop inside). Never shown to passengers."></textarea>
                     </div>
 
                     <!-- Image Upload Zone -->
@@ -208,6 +218,9 @@
                                                 {{ lost.tracking_id or lost.id }}
                                             </span>
                                             <h4 class="text-sm font-bold text-slate-800">{{ lost.name }}</h4>
+                                            {% if lost.match_status %}
+                                            <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded border border-slate-200 bg-white text-slate-600">{{ lost.match_status | replace('_', ' ') }}</span>
+                                            {% endif %}
                                         </div>
                                         <p class="text-xs text-tn-blue font-bold mono">{{ lost.phone }}</p>
                                         <p class="text-[10px] text-slate-500 mt-1 line-clamp-2">
