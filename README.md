@@ -23,6 +23,7 @@ In traditional transport systems, lost items are recorded in manual registers, l
 - [x] **Authentication**: Secure depot-specific login system.
 - [x] **Passenger OTP Login (Feature 1)**: PNR + registered-mobile verification with a one-time password before Lost & Found access (see below).
 - [x] **Automatic Match Notification (Feature 2)**: confidence-routed WhatsApp/email alerts with staff review, retries, fallback and a 7-day hold (see below).
+- [x] **Secure Claims & QR Pickup (Feature 3)**: secret-question ownership check (English/Tamil/Tanglish), gated photo, item locking, signed single-use pickup code + QR, atomic handover with custody log (see below).
 
 ### **Frontend & UI**
 - [x] **Passenger Portal**: Dynamic forms with real-time stop suggestions based on selected routes.
@@ -94,7 +95,9 @@ passenger bookings (PNRs) used by passenger login:
 python seed_transport.py
 python seed_bookings.py
 python seed_matches.py      # optional: Feature 2 demo matches
+python seed_claims.py       # optional: Feature 3 demo claims (needs SIGNING_SECRET)
 ```
+For a guided live demo of all three features, follow [`docs/DEMO.md`](docs/DEMO.md).
 
 ### 5. Start Application
 ```bash
@@ -259,10 +262,84 @@ Design decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) (F2-01 … F2-14). Ru
 
 ---
 
+## 🛡️ Secure Claims & QR Pickup (Feature 3)
+
+A match notification alone does not let someone take an item. The passenger has to prove
+ownership, and the depot hands the item over only against a signed, single-use pickup code.
+
+### Flow
+1. **Depot logs the item** with a category and a few **secret ownership details**, such as zipper
+   tag colour, one thing inside, brand, a sticker/scratch, or the lock-screen wallpaper. They are
+   hashed immediately and nobody can read them back. The item gets a printable **QR tag**
+   (`TAG-XXXXXXXX`) and a custody-log entry.
+2. **Passenger opens the match → "This is my item".** They answer 2–3 questions, chosen at random
+   and varied by item category, and never answerable from the notification text.
+   - Answers may be in **English, Tamil or Tanglish** ("yellow" / "manjal" / "மஞ்சள்"), and small
+     typos are fine.
+   - Only overall progress is shown, never which answer was wrong.
+3. **Weighted trust score:**
+
+   | Score | Result |
+   |---|---|
+   | ≥ 0.75 | approved automatically |
+   | 0.50 – 0.75 | one stricter follow-up question, then staff review if still unsure |
+   | < 0.50 | another round (max 3), then **locked** for an in-person photo-ID check |
+
+4. **After verification** the found-item photo can be viewed through a 2-minute signed link. The
+   item is locked to this claim (a second passenger can never also be approved). The passenger
+   receives a **pickup code** (`A7X2-K9P4`) and a **QR**, valid 7 days, with download, print and
+   countdown.
+5. **At the counter** staff scan the passenger's QR (or type the code) and the item's QR tag, check
+   photo ID, and hand over. A single all-or-nothing step then:
+   - writes the custody log (who, when, depot, staff, claim);
+   - marks the item `handed_over`;
+   - completes the claim and burns the code;
+   - notifies the passenger.
+6. **Lost phone?** After an ID check, staff can **reissue** the code, which revokes the old one.
+   Cancelling or expiring a claim releases the item.
+
+### API
+Passenger (Feature 1 session; a claim is visible only to its owner, everything else is 404):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /claims[?matchId=]` | my claims |
+| `POST /claims` `{"matchId"}` | "This is my item": open a claim (409 if one is open, the hold expired or the item is taken) |
+| `GET /claims/<id>` | status and progress |
+| `POST /claims/<id>/cancel` | cancel (releases the item) |
+| `GET /claims/<id>/questions` | current questions: ids and text only |
+| `POST /claims/<id>/answers` `{"answers": {id: text}}` | submit; returns status and progress only |
+| `GET /claims/<id>/photo` | signed 120 s photo URL, only after verification (403 before) |
+| `GET /claims/<id>/token` · `/token.svg` | pickup code + QR, only after approval (403 before) |
+
+Staff (depot login, scoped to the depot holding the item):
+
+| Method & path | Purpose |
+|---|---|
+| `GET /staff/claims?status=staff_review` | queue (also `locked`, `token_issued`, …) |
+| `POST /staff/claims/<id>/approve` `{"idVerified"?}` | approve; `locked` claims require `idVerified: true` |
+| `POST /staff/claims/<id>/reject` | reject |
+| `POST /staff/claims/<id>/reissue-token` `{"idVerified": true}` | lost phone: new code, old one revoked |
+| `POST /pickup/verify` `{"token", "qrTagId"?}` | read-only check with a reason (`expired`, `already_used`, `wrong_depot`, `tag_mismatch`, …) |
+| `POST /pickup/complete` `{"token", "qrTagId", "idChecked": true, "staffName"?}` | atomic handover |
+
+Pages: `/passenger/claims/<id>` (wizard, photo, token), `/staff/claims-desk` (scanner, queue,
+reissue), `/staff/items/<foundId>/tag` (printable tag + custody log).
+
+Feature 3 settings (`TRUST_THRESHOLD`, `TRUST_REVIEW_MIN`, `CLAIM_MAX_ROUNDS`,
+`CLAIM_TOKEN_TTL_DAYS`, photo-link TTL, daily and IP limits) are listed in `.env.example`.
+**`SIGNING_SECRET` must stay stable**, because changing it invalidates stored secret answers and
+issued pickup codes.
+
+Design decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) (F3-01 … F3-14). Rule-to-test map:
+[`docs/VERIFICATION_F3.md`](docs/VERIFICATION_F3.md). Summary of all three features:
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md). Live demo script: [`docs/DEMO.md`](docs/DEMO.md).
+
+---
+
 ## 🏆 Impact & Roadmap
 - **Social Impact**: Reduces passenger anxiety and increases trust in public transport.
 - **Future Scope**:
-    - Aadhaar-based identity verification for item collection.
-    - Automated SMS/WhatsApp notifications via Twilio.
+    - Aadhaar-based identity verification for item collection (today staff check a photo ID at the counter).
     - Computer Vision for automatic item categorization from photos.
     - Multi-language support (Tamil & English).

@@ -106,6 +106,9 @@
                         <span class="text-[10px] text-tn-blue uppercase font-bold tracking-widest">Authorized Staff</span>
                     </div>
                     <a href="{{ url_for('match_notify.staff_review_page') }}" class="text-slate-600 hover:text-tn-blue font-bold text-sm uppercase">Match Review</a>
+                    {% if claim_catalogue is defined %}
+                    <a href="{{ url_for('claims.claims_desk') }}" class="text-slate-600 hover:text-tn-blue font-bold text-sm uppercase">Claims &amp; Pickup</a>
+                    {% endif %}
                     <a href="{{ url_for('depot_dashboard') }}" class="text-slate-600 hover:text-tn-blue font-bold text-sm uppercase">Dashboard</a>
                     <a href="{{ url_for('depot_logout') }}" class="text-tn-red hover:underline font-bold text-sm uppercase">Logout</a>
                 </div>

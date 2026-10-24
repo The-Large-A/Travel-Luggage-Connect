@@ -51,11 +51,13 @@
         <div class="px-6 pb-6 space-y-2">
             <button id="start-claim-btn" type="button" data-match-id="{{ match.matchId }}"
                     class="w-full btn-gov-primary text-sm uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled aria-disabled="true">
-                Start claim / உரிமை கோருக
+                    {% if not match.claim.canStart %}disabled aria-disabled="true"{% endif %}>
+                This is my item / இது என் பொருள்
             </button>
+            <a id="continue-claim-link" href="#" class="hidden w-full btn-gov-primary text-sm uppercase tracking-widest">Continue my claim</a>
+            <p id="claim-error" role="alert" class="hidden text-xs font-semibold text-tn-red"></p>
             {% if match.claim.canStart %}
-            <p class="text-xs text-slate-500">To collect the item now, visit {{ match.foundAt }} with report ID <span class="mono font-bold">{{ match.reportId }}</span> and a photo ID before the hold ends.</p>
+            <p class="text-xs text-slate-500">You will answer a few questions only the owner would know. After that you get a pickup code for {{ match.foundAt }}.</p>
             {% endif %}
         </div>
     </div>
@@ -64,6 +66,40 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+(() => {
+    const btn = document.getElementById('start-claim-btn');
+    const link = document.getElementById('continue-claim-link');
+    const err = document.getElementById('claim-error');
+    const matchId = btn.dataset.matchId;
+    const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+    const OPEN = ['opened', 'questions_pending', 'failed', 'verified', 'staff_review', 'locked', 'approved', 'token_issued', 'completed'];
+    fetch('/claims?matchId=' + encodeURIComponent(matchId), { credentials: 'same-origin' })
+        .then(r => r.ok ? r.json() : { claims: [] })
+        .then(data => {
+            const current = (data.claims || []).find(c => OPEN.includes(c.status));
+            if (current) {
+                link.href = '/passenger/claims/' + encodeURIComponent(current.claimId);
+                link.classList.remove('hidden');
+                btn.classList.add('hidden');
+            }
+        })
+        .catch(() => {});
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        err.classList.add('hidden');
+        const resp = await fetch('/claims', { method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+            body: JSON.stringify({ matchId }) });
+        const data = await resp.json().catch(() => ({}));
+        const id = (data.claim && data.claim.claimId) || (data.error && data.error.claimId);
+        if (id) { window.location.assign('/passenger/claims/' + encodeURIComponent(id)); return; }
+        err.textContent = (data.error && data.error.message) || 'Could not start the claim.';
+        err.classList.remove('hidden');
+        btn.disabled = false;
+    });
+})();
+</script>
 {% if match.state == 'active' and match.holdSecondsRemaining is not none %}
 <script>
 (() => {

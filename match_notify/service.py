@@ -519,6 +519,12 @@ class MatchNotifyService:
         state = self.passenger_state(match)
         if state == "active" and hold is not None and from_db(hold) <= now:
             state = "expired"
+        # Item reserved or collected through someone else's claim (Feature 3): say only "unavailable".
+        lock = found.get("claimLock") or {}
+        if state in ("active", "claim_started") and (
+                (found.get("status") == "claim_locked" and lock.get("matchId") != str(match["_id"]))
+                or found.get("status") in ("handed_over", "resolved")):
+            state = "unavailable"
         return {
             "matchId": str(match["_id"]),
             "reportId": lost.get("tracking_id"),
@@ -545,9 +551,10 @@ class MatchNotifyService:
             lost = report_ids[n["reportId"]]
             out.append({
                 "id": str(n["_id"]), "matchId": n["matchId"], "reportId": lost.get("tracking_id"),
-                "title": f"Possible match found for report {lost.get('tracking_id')}",
+                "kind": n.get("kind", "match_found"),
+                "title": n.get("title") or f"Possible match found for report {lost.get('tracking_id')}",
                 "createdAt": iso_utc(n["createdAt"]), "createdAtIst": fmt_ist(n["createdAt"]),
-                "link": f"/passenger/matches/{n['matchId']}",
+                "link": n.get("link") or f"/passenger/matches/{n['matchId']}",
             })
         return out
 

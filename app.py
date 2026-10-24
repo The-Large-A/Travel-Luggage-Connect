@@ -30,6 +30,8 @@ from notifications import notification_service
 import transport_schema as T
 from passenger_auth import init_passenger_auth, require_passenger
 from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
+from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
+from claims import encode_private_attributes, new_tag_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -94,6 +96,10 @@ match_notifier = init_match_notify(
     rematch_found=lambda found: compute_and_save_matches(
         found, depots_collection.find_one({"phone": found.get("depot_phone")}) or {}),
 ).service
+
+# Feature 3: secure claims and QR pickup tokens (also makes found-item photos staff-only).
+claims_state = init_claims(app, db)
+claims_service = claims_state.service
 
 # AI Models
 logger.info("Initialising AI models...")
@@ -742,6 +748,7 @@ def submit_found():
     date            = request.form.get('date')
     notes           = request.form.get('notes')
     public_description = (request.form.get('public_description') or '').strip()
+    category        = request.form.get('category') or 'other'
     found_seat_area = request.form.get('found_seat_area') or None
 
     if not all([route_id, date, notes, public_description]):
@@ -796,6 +803,14 @@ def submit_found():
 
     found_id = uuid.uuid4().hex   # Unique internal ID for this found report
 
+    # Feature 3: private attributes are hashed right here; the raw answers are never stored.
+    if category not in ITEM_CATEGORIES:
+        category = 'other'
+    private_attributes = encode_private_attributes(
+        {name: request.form.get(f'attr_{name}') for name in PRIVATE_ATTRIBUTES},
+        category, public_description, claims_service.answer_key,
+        claims_state.config.fuzzy_min_token_length)
+
     report = {
         "found_id":        found_id,          # Unique internal ID (used in matches)
         "id":              found_id[:8],      # Short display ID
@@ -811,6 +826,9 @@ def submit_found():
         "date":            date,
         "notes":           notes,             # private: staff only
         "public_description": public_description[:120],   # the only text passengers see
+        "category":        category,
+        "private_attributes": private_attributes,          # hashed claim-verification answers
+        "qrTagId":         new_tag_id(),                   # printed and stuck on the item
         "image_path":      image_path,
         "ocr_text":        ocr_text,          # cached; reused by the matcher
         "status":          "open",
@@ -818,6 +836,7 @@ def submit_found():
     }
 
     found_collection.insert_one(report)
+    claims_service.record_item_logged(report, depot_phone)
 
     # Run AI matching and SAVE results to matches collection
     n = compute_and_save_matches(report, depot)
@@ -1131,6 +1150,10 @@ def resolve_match():
     if match.get("status") not in MATCH_ACTIVE_STATUSES:
         return jsonify({"success": False,
                         "message": f"Match is {match.get('status')} and can no longer be resolved."}), 409
+    item = found_collection.find_one({"found_id": match["found_id"]}) or {}
+    if item.get("status") not in (None, "open"):
+        return jsonify({"success": False,
+                        "message": "This item is reserved by a passenger claim; use the claims desk."}), 409
 
     request_id = match["request_id"]   # trusted: comes from the match document
 

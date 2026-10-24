@@ -312,3 +312,88 @@ class F2:
 @pytest.fixture
 def f2(db, clock, sms):
     return F2(db, clock, sms)
+
+
+# ── Feature 3 (claims) fixtures ──────────────────────────────────────────────
+from claims import init_claims                                          # noqa: E402
+from claims.attributes import encode_private_attributes                 # noqa: E402
+from claims.config import ClaimsConfig                                  # noqa: E402
+from claims.tokens import new_tag_id                                    # noqa: E402
+
+# Ground truth a real owner knows; staff recorded these while logging the item.
+BAG_TRUTH = {"zipper_tag_colour": "yellow", "content_item": "steel tiffin box",
+             "brand": "Wildcraft", "distinguishing_mark": "Chennai Super Kings sticker"}
+PNG_BYTES = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15"
+             b"\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82")
+
+
+def make_claims_config(**overrides):
+    base = dict(ip_limit=10000, max_claims_per_day=50, max_answer_submissions_per_day=500)
+    base.update(overrides)
+    return ClaimsConfig(**base)
+
+
+class F3(F2):
+    def __init__(self, db, clock, sms, upload_root, claims_config=None, csrf=False):
+        super().__init__(db, clock, sms, csrf=csrf)
+        self.upload_root = upload_root
+        self.claims_state = init_claims(self.app, db, config=claims_config or make_claims_config(),
+                                        clock=clock, upload_root=str(upload_root))
+        self.csvc = self.claims_state.service
+
+    def item(self, found_id="item-1", depot=DEPOT_A, category="bag", truth=None, public="Black backpack",
+             photo=True, **extra):
+        truth = BAG_TRUTH if truth is None else truth
+        image_path = None
+        if photo:
+            (self.upload_root / "uploads").mkdir(exist_ok=True)
+            (self.upload_root / "uploads" / f"{found_id}.png").write_bytes(PNG_BYTES)
+            image_path = f"uploads/{found_id}.png"
+        attrs = encode_private_attributes(truth, category, public, self.csvc.answer_key,
+                                          self.claims_state.config.fuzzy_min_token_length)
+        return self.found(found_id=found_id, depot=depot, public=public, category=category,
+                          private_attributes=attrs, qrTagId=new_tag_id(), image_path=image_path, **extra)
+
+    def notified_match(self, ident, tracking="TRK-AAAA0001", found_id="item-1", item=None, **item_kw):
+        item = item or self.db.found_reports.find_one({"found_id": found_id}) or self.item(found_id, **item_kw)
+        match, _ = self.match(self.lost(ident, tracking=tracking), item, 0.92)
+        self.run_jobs()
+        return self.db.matches.find_one({"_id": match["_id"]})
+
+    def open_claim(self, client, match):
+        resp = client.post("/claims", json={"matchId": str(match["_id"])})
+        assert resp.status_code == 201, resp.get_json()
+        return resp.get_json()["claim"]["claimId"]
+
+    def answer(self, client, claim_id, truth=None, wrong=(), overrides=None):
+        """Answer the pending questions: correct from `truth` unless listed in `wrong`."""
+        truth = BAG_TRUTH if truth is None else truth
+        qs = client.get(f"/claims/{claim_id}/questions")
+        assert qs.status_code == 200, qs.get_json()
+        answers = {}
+        for q in qs.get_json()["questions"]:
+            qid = q["id"]
+            if overrides and qid in overrides:
+                answers[qid] = overrides[qid]
+            else:
+                answers[qid] = "purple elephant" if qid in wrong else truth[qid]
+        return client.post(f"/claims/{claim_id}/answers", json={"answers": answers})
+
+    def pending(self, claim_id):
+        return self.db.claims.find_one({"claimId": claim_id})["pendingQuestions"]
+
+    def approved_claim(self, ident=ARUN, **kw):
+        client = self.login_passenger(ident, client=self.app.test_client())
+        match = self.notified_match(ident, **kw)
+        claim_id = self.open_claim(client, match)
+        resp = self.answer(client, claim_id)
+        assert resp.get_json()["claim"]["status"] == "token_issued", resp.get_json()
+        return client, claim_id
+
+    def token(self, client, claim_id):
+        return client.get(f"/claims/{claim_id}/token").get_json()["token"]
+
+
+@pytest.fixture
+def f3(db, clock, sms, tmp_path):
+    return F3(db, clock, sms, tmp_path)

@@ -21,10 +21,17 @@ class NotificationWorker:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
+        self._tasks = []
+
+    def add_task(self, fn):
+        """Run `fn()` on every cycle too (e.g. Feature 3's claim expiry)."""
+        self._tasks.append(fn)
 
     def run_once(self) -> dict:
         sent = self.service.process_due_notifications(self.worker_id)
         released = self.service.release_expired_matches()
+        for task in self._tasks:
+            task()
         return {"jobs": sent, "released": released}
 
     def _loop(self):

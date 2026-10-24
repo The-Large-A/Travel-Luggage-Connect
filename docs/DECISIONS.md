@@ -357,3 +357,179 @@ never reach Feature 2.
 only inside the 24-hour customer-service window. Business-initiated production messages need a
 pre-approved template registered in Meta Business Manager. `EMAIL_PROVIDER=smtp` sends UTF-8
 text + HTML. All three real adapters were tested with fake transports only, not live accounts.
+
+---
+
+## Feature 3 — Secure claims & QR pickup token
+
+### F3-01 · Packaged like Features 1 and 2; earlier features only hooked
+Feature 3 lives in `claims/` and is wired in with `init_claims(app, db)` after the other two. It
+reuses Feature 1's `require_passenger`, rate limiter, signing secret and SMS provider, and
+Feature 2's `require_staff`, `match_for_passenger`, notifications collection and worker. The
+only edits to earlier features are small hooks:
+- the worker gained `add_task` (runs claim expiry);
+- in-app notifications carry an optional `kind`/`title`/`link`;
+- the match view shows **unavailable** when someone else's claim locked or collected the item;
+- the match page's disabled button became the working "This is my item".
+
+### F3-02 · There was no QR tag logic or custody log; both are new
+The brief refers to an "existing item QR tag" and "custody log"; neither existed. Now:
+- every found item logged through the depot form gets a `qrTagId` (`TAG-XXXXXXXX`, CSPRNG, same
+  unambiguous alphabet as pickup codes);
+- a printable tag page (`/staff/items/<id>/tag`, QR encodes `TNSTC-TAG:<id>`) shows the item's
+  custody history;
+- `custody_log` is an append-only collection with a `logged` entry at intake and a `handover`
+  entry at pickup (who, when, depot, staff, claim, recipient, ID checked).
+
+Items logged before Feature 3 have no tag or secret attributes. Their claims go straight to staff
+review (F3-05), and handover needs a tag, so staff should re-log or tag them.
+
+### F3-03 · Found-item photos were publicly downloadable; now they are staff-only
+Uploads lived under `static/uploads/`, so anyone who knew a filename could fetch them, defeating
+photo gating. A `before_request` guard now returns 404 for `/static/uploads/*` unless the
+requester has a depot-staff session. The depot dashboard keeps working; storage paths and the
+matcher are unchanged. Passengers see a photo only through
+`/claims/<id>/photo/file?exp&sig`. That link is HMAC-signed over (claimId, expiry), expires after
+`CLAIM_PHOTO_URL_TTL_SECONDS` (120 s), still requires the owner's session, and is served with
+`Cache-Control: no-store`.
+
+### F3-04 · Secret answers are stored only as keyed hashes, with typo tolerance
+Staff type private attributes once, while logging. They are normalised (NFC, casefold,
+punctuation/emoji stripped, stopwords dropped, English/Tamil/Tanglish synonyms folded to a
+canonical word) and stored as `HMAC(key, token)`. Tokens of 5+ characters also store the HMACs of
+their one-character-deletion variants. Comparing deletion variants on both sides ("symmetric
+delete") accepts one typo per word (substitution, insertion, deletion or adjacent swap) while
+the database holds no readable answer. Submitted answers are hashed the same way and discarded;
+the claim keeps only `{round, question, outcome: pass|fail}`.
+Consequences:
+- staff cannot read the attributes back later;
+- **rotating `SIGNING_SECRET` invalidates every stored attribute hash and every issued pickup
+  code** (the keys are derived from it per purpose). Keep it stable.
+
+Anti-guessing:
+- a colour answer naming more than two colours scores nothing;
+- an answer far longer than the expected one scores nothing;
+- words shorter than 5 characters must match exactly.
+
+### F3-05 · Question selection
+Six attributes are scored with weights (heavier = harder for a stranger to guess):
+- *zipper/tag colour* (1.0), *case colour* (1.0) and *brand* (1.0);
+- *one item inside* (1.5), *sticker/scratch/mark* (1.5) and *lock-screen wallpaper* (1.5).
+
+Each applies to certain categories, so phones are asked about the lock screen while bags are asked
+about their contents. An attribute whose words appear in the public description (which goes out in
+the Feature 2 notification) is flagged `leaked` at logging time and never asked.
+
+How many questions:
+- **2** askable attributes → 2 questions;
+- **3** → 2 questions plus 1 in reserve;
+- **4+** → 3 questions plus 1 in reserve.
+
+Order is a CSPRNG shuffle, and later rounds prefer attributes not asked in the previous round.
+With fewer than 2 askable attributes, the claim goes straight to `staff_review`. Passengers only
+ever see question ids and text.
+
+### F3-06 · Trust score and rounds
+Trust = weighted share of passed questions in the round:
+- **≥ `TRUST_THRESHOLD` (0.75)** → `verified`, then automatic approval;
+- **≥ `TRUST_REVIEW_MIN` (0.50)** → borderline. Ask the reserve question with **strict**
+  matching (no typo tolerance, ≥ 2/3 of its words). If the round now reaches the threshold it is
+  verified, otherwise `staff_review`. With no reserve, it goes directly to `staff_review`;
+- **< 0.50** → the round fails. The claim goes `failed` → next round, up to `CLAIM_MAX_ROUNDS` (3).
+  The last failed round goes to `locked`, routed to staff for an in-person photo-ID check
+  (approval then requires `idVerified: true`).
+
+The follow-up is part of the same round, not a new one. The passenger sees only status and
+"round n of 3", never the score or which answer failed. A text answer passes at
+`CLAIM_ANSWER_MATCH_MIN` (0.5) of its expected words; a colour must match.
+
+### F3-07 · State machine
+`opened → questions_pending → verified | failed | locked | staff_review`, then
+`failed → questions_pending`, then `verified | staff_review | locked → approved → token_issued
+→ completed`. Also `token_issued → token_issued` (reissue), and any open state → `cancelled` or
+`expired`.
+- Every move is a compare-and-set on the current status, appended to the claim's `history`
+  (from, to, at, by, reason) and logged. Illegal or stale moves raise and return 409.
+- **Staff reject** ends a claim as `cancelled` (reason `rejected_by_staff`), since the brief's
+  state list has no separate rejected state.
+- **Expiry.** Open claims expire with the match hold, or at token expiry once a token is
+  issued. Expiry runs on the background worker and lazily on every access.
+
+### F3-08 · "One active claim per item"
+Several passengers matched to the same item may each *answer questions*. The item is reserved only
+when a claim is approved. Two unique partial indexes back this:
+- one *open* claim per match (`openForMatch`), so there are no duplicate claims;
+- one *locking* claim per item (`lockActive`, set in `approved`/`token_issued`).
+
+Approval first moves the item `open → claim_locked` with an atomic compare-and-set (recording
+`claimLock` {claimId, matchId}), so two approvals can never both win. The loser's claim is
+cancelled (`item_claimed_by_another`), and its match shows only "unavailable". Locking at
+question time instead would let anyone holding a match block the real owner.
+- **Cancel or expiry** releases the lock (item back to `open`) and returns the match to `notified`
+  if its hold is still running, or `released` otherwise.
+- **After a handover** every other open claim and match on that item is closed.
+
+### F3-09 · Pickup code and QR
+- **Code.** `XXXX-XXXX` over a 32-symbol alphabet with no 0/O/1/I (40 bits), derived as
+  `HMAC(key, claimId|nonce)`, where the nonce is 16 CSPRNG bytes drawn at issuance. Only
+  `HMAC(key, code)` is stored as `tokenHash`, and comparison is constant-time. Deriving the code
+  lets the passenger's screen show it again later; storing only random codes would make the screen
+  impossible to re-display. A database dump alone yields no valid code.
+- **QR.** `TNSTC1.<base64url(json)>.<base64url(HMAC-SHA256)>` with
+  `{v, cid, iid, tag, pnr, exp, code}`, generated server-side as SVG with `segno`, the one new
+  dependency. Pure Python, no native libraries.
+- **Validity.** `CLAIM_TOKEN_TTL_DAYS` (7) from issuance, exclusive bound, single use
+  (`tokenUsedAt`).
+- **Reissue.** Requires `idVerified: true`. It draws a new nonce, so the old code no longer
+  resolves to the claim and the old QR fails the hash check. It also resets the 7-day validity.
+
+### F3-10 · Pickup checks and the handover transaction
+`/pickup/verify` is read-only and returns a reason code. `/pickup/complete` repeats every check,
+then additionally requires the item's QR tag and `idChecked: true`. Checks, in order:
+`malformed`, `bad_signature`, `not_found`, `item_mismatch`, `revoked`, `already_used`, `expired`,
+`not_issued`, `wrong_depot`, `item_released`, `tag_required`/`tag_mismatch`.
+
+The handover is one unit of work, every step a compare-and-set:
+1. claim `token_issued → completed` (+ `tokenUsedAt`);
+2. item `claim_locked` (by this claim) → `handed_over`;
+3. insert the custody entry;
+4. match → `resolved`;
+5. lost report → `resolved`.
+
+How atomicity is achieved:
+- **Replica set / Atlas.** The steps run in a MongoDB multi-document transaction
+  (`session.with_transaction`).
+- **Standalone server / mongomock.** Each write records an undo step, and any failure replays the
+  undo log in reverse. Tests inject failures at three points and confirm every document is
+  byte-identical afterwards.
+- **Concurrent scans.** Exactly one wins, because both the claim CAS and the item CAS must match.
+
+**Limitations.**
+- The transaction path could not be exercised locally (no replica set available).
+- In the fallback mode a concurrent reader could briefly observe a half-finished handover before
+  it is rolled back. Real transactions do not have this window.
+
+### F3-11 · Staff identity
+Depot logins are shared per depot, with no individual staff accounts. `staffId` is the depot
+account, and the counter officer may type their name (`staffName`), which is stored in the claim
+and custody entry. Individual staff accounts would be the next improvement.
+
+### F3-12 · Limits
+- **Per IP:** `CLAIM_IP_LIMIT` (60 per `CLAIM_IP_WINDOW_SECONDS`, 600 s) on every claim, photo,
+  token and pickup endpoint.
+- **Per passenger per day:** `CLAIM_MAX_CLAIMS_PER_DAY` (3) claims opened, and
+  `CLAIM_MAX_ANSWER_SUBMISSIONS_PER_DAY` (10) answer submissions.
+- **Per round:** 3 rounds per claim (F3-06).
+- **Replay:** each answer submission carries an `answerSeq` compare-and-set, so a replayed or
+  duplicate submission gets 409 and is never scored twice.
+
+### F3-13 · The legacy depot "resolve" button
+The pre-existing `/api/match/resolve` (staff mark a match resolved) is kept for items without
+claims. It now refuses with 409 when the item is `claim_locked` or already handed over, so it
+cannot bypass a claim.
+
+### F3-14 · Notifications
+Approval, reissue and handover each create an in-app notification (kind `claim_approved`,
+`token_reissued_vN` or `pickup_completed`, linking to the claim page). Each also sends an SMS
+through Feature 1's `SmsProvider.send_message`. The pickup code is never sent by SMS; the passenger
+logs in to see it. The handover SMS says "if this was not you, contact the depot".
