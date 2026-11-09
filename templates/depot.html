@@ -41,9 +41,19 @@
 
         <!-- ═══ LEFT: Found Item Entry Form ══════════════════════════════════ -->
         <div class="space-y-8">
+            <!-- Phase 2: one-button camera scan -->
+            <a href="{{ url_for('item_intake.intake_page') }}"
+               class="mb-6 flex items-center justify-between gap-4 p-5 rounded-lg bg-green-700 text-white shadow-md hover:bg-green-800 transition-colors">
+                <div>
+                    <p class="text-lg font-heading font-bold uppercase tracking-wide">📷 Add new lost item</p>
+                    <p class="text-xs opacity-90">Show it to the laptop or phone camera. The record, description, QR tag and security questions are created automatically.</p>
+                </div>
+                <span class="text-2xl font-bold">→</span>
+            </a>
+
             <div class="card-professional overflow-hidden">
                 <div class="bg-tn-blue p-5 text-white">
-                    <h2 class="text-lg font-heading font-bold uppercase tracking-wide">Register Found Item</h2>
+                    <h2 class="text-lg font-heading font-bold uppercase tracking-wide">Register Found Item (manual)</h2>
                     <p class="font-tamil text-[11px] opacity-80">கண்டறியப்பட்ட உடைமைப் பதிவு</p>
                 </div>
 
@@ -265,6 +275,11 @@
                                         <p class="text-[10px] text-slate-500 mt-1 line-clamp-2">
                                             "{{ lost.description }}"
                                         </p>
+                                        {% if lost.storageLocation or lost.seat_no %}
+                                        <p class="text-[10px] font-bold text-amber-700 mt-1">
+                                            {% if lost.seat_no %}Seat {{ lost.seat_no }}{% endif %}{% if lost.storageLocation %} · Kept: {{ storage_labels.get(lost.storageLocation, lost.storageLocation) }}{% endif %}
+                                        </p>
+                                        {% endif %}
                                     </div>
                                     <!-- Call & Resolve buttons -->
                                     <div class="flex flex-col gap-2 flex-shrink-0">

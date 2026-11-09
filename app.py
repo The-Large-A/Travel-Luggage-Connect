@@ -36,6 +36,7 @@ from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRI
 from claims import encode_private_attributes, new_tag_id
 from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
                         vocabulary_payload)
+from item_intake import init_item_intake
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -868,7 +869,8 @@ def depot_dashboard():
         depot_phone=depot_phone,
         found_reports=depot_found,
         all_matches=all_matches,
-        clip_available=image_sim.available
+        clip_available=image_sim.available,
+        storage_labels=STORAGE_LABELS,
     )
 
 
@@ -1463,6 +1465,13 @@ def resolve_match():
         "success": True,
         "message": "Match resolved successfully."
     })
+
+
+# Phase 2, Feature C: "Add new lost item" camera scan. OpenCV gates the frames;
+# CLIP (image_sim.zero_shot), OCR and the offline captioner build the record,
+# which is saved through the same create_found_report as the manual form.
+intake_state = init_item_intake(app, db, create_found=create_found_report,
+                                classifier=image_sim, ocr=ocr_ext)
 
 
 @app.errorhandler(413)

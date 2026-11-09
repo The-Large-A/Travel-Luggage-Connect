@@ -72,6 +72,9 @@ PICKUP_REASONS = {
     "tag_mismatch": "The scanned item tag does not match the claimed item.",
     "tag_required": "Scan or enter the item's QR tag to confirm the handover.",
     "id_check_required": "Confirm that you checked the passenger's photo ID.",
+    "id_last4_required": "Ask the passenger for the last 4 digits of the Aadhaar / VID they logged in with.",
+    "id_mismatch": "Those digits do not match the identity on this claim. Do not hand over.",
+    "id_otp_required": "Send the OTP to the passenger's Aadhaar-linked mobile and enter it.",
     "report_closed": "The lost report was closed, so this handover cannot be recorded.",
     "match_changed": "The match was changed by another action. Reload and try again.",
 }
@@ -79,8 +82,9 @@ PICKUP_REASONS = {
 
 class ClaimsService:
     def __init__(self, db, config, signing_secret, clock, limiter, match_service, sms=None,
-                 upload_root=os.path.join("static")):
+                 upload_root=os.path.join("static"), identity=None):
         self.db = db
+        self.identity = identity            # Phase 2: mock-Aadhaar OTP for the pickup re-check
         self.config = config
         self.clock = clock
         self.limiter = limiter
@@ -566,11 +570,31 @@ class ClaimsService:
                 raise TokenError("tag_mismatch")
         return claim, item, code
 
+    def owner_identity(self, claim):
+        """The {type, token, last4} the claimant verified with (Aadhaar login), or None."""
+        report = self.lost.find_one({"request_id": claim["reportId"]}) or {}
+        ident = report.get("ownerIdentity")
+        return ident if isinstance(ident, dict) and ident.get("token") else None
+
     def pickup_summary(self, claim, item):
+        ident = self.owner_identity(claim)
         return {"claimId": claim["claimId"], "reportId": self._tracking(claim), "claimerName": claim["claimerName"],
                 "claimerPhone": mask_phone(claim["claimerPhone"]), "pnr": claim["pnr"],
                 "itemDescription": item.get("public_description"), "qrTagId": item.get("qrTagId"),
-                "tokenExpiresAt": iso_utc(claim["tokenExpiresAt"]), "idVerified": claim.get("idVerified", False)}
+                "tokenExpiresAt": iso_utc(claim["tokenExpiresAt"]), "idVerified": claim.get("idVerified", False),
+                # Phase 2: staff never see the digits; they ask, and the server compares.
+                "identityCheck": "aadhaar_otp" if ident and self.identity is not None else "photo_id"}
+
+    def send_pickup_otp(self, token, depot_phone, ip):
+        """Feature F: OTP to the claimant's Aadhaar-linked phone. Returns the masked phone."""
+        try:
+            claim, _item, _code = self._check_pickup(token, depot_phone)
+        except TokenError as e:
+            raise ClaimError(409, e.reason, PICKUP_REASONS.get(e.reason, e.reason))
+        ident = self.owner_identity(claim)
+        if not ident or self.identity is None:
+            raise ClaimError(409, "no_identity", "This claim was made without Aadhaar; check a photo ID instead.")
+        return self.identity.send_pickup_otp(ident["token"], ip)
 
     def verify_pickup(self, token, depot_phone, tag=None) -> dict:
         try:
@@ -580,13 +604,29 @@ class ClaimsService:
         return {"valid": True, "reason": "ok", "message": "Valid pickup code. Check photo ID, then confirm.",
                 "claim": self.pickup_summary(claim, item)}
 
-    def complete_pickup(self, token, depot_phone, tag, id_checked, staff_name=None):
-        if id_checked is not True:
-            raise ClaimError(400, "id_check_required", PICKUP_REASONS["id_check_required"])
+    def complete_pickup(self, token, depot_phone, tag, id_checked, staff_name=None, id_last4=None, id_otp=None):
         try:
             claim, item, code = self._check_pickup(token, depot_phone, tag, require_tag=True)
         except TokenError as e:
             raise ClaimError(409, e.reason, PICKUP_REASONS.get(e.reason, e.reason))
+        # Phase 2 (Feature F): a claimant who logged in with Aadhaar is re-checked
+        # with the last 4 digits + an OTP to the Aadhaar-linked phone; everyone
+        # else keeps the staff photo-ID check. Only the type and last 4 are logged.
+        ident = self.owner_identity(claim)
+        if ident and self.identity is not None:
+            digits = (id_last4 or "").strip()
+            if len(digits) != 4 or not digits.isdigit():
+                raise ClaimError(400, "id_last4_required", PICKUP_REASONS["id_last4_required"])
+            if not hmac.compare_digest(digits, ident["last4"]):
+                raise ClaimError(409, "id_mismatch", PICKUP_REASONS["id_mismatch"])
+            if not id_otp:
+                raise ClaimError(400, "id_otp_required", PICKUP_REASONS["id_otp_required"])
+            self.identity.verify_pickup_otp(ident["token"], id_otp)       # raises AuthError on a bad OTP
+            id_record = {"idType": ident.get("type", "aadhaar"), "idLast4": ident["last4"], "otpVerified": True}
+        else:
+            if id_checked is not True:
+                raise ClaimError(400, "id_check_required", PICKUP_REASONS["id_check_required"])
+            id_record = {"idType": "photo_id", "otpVerified": False}
         now = self.clock()
         depot = self.db["depots"].find_one({"phone": depot_phone}) or {}
 
@@ -609,7 +649,8 @@ class ClaimsService:
                 "claimId": claim["claimId"], "matchId": claim["matchId"], "reportId": claim["reportId"],
                 "depotId": depot_phone, "depotName": depot.get("name"), "staffId": depot_phone,
                 "staffName": staff_name, "idChecked": True, "recipientName": claim["claimerName"],
-                "recipientPhone": mask_phone(claim["claimerPhone"]), "pnr": claim["pnr"], "at": to_db(now)})
+                "recipientPhone": mask_phone(claim["claimerPhone"]), "pnr": claim["pnr"], "at": to_db(now),
+                **id_record})
             tx.cas_update(MATCHES, {"_id": self._match_oid(claim), "status": CLAIM_STARTED},
                           {"$set": {"status": RESOLVED, "resolution": "handed_over", "resolvedAt": to_db(now)}},
                           "match_changed")

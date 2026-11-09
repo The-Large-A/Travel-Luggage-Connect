@@ -62,7 +62,8 @@ def init_claims(app, db, config=None, clock=None, environ=None, upload_root=None
     clock = clock or utcnow
     limiter = RateLimiter(db, clock)
     service = ClaimsService(db, config, auth.config.signing_secret, clock, limiter, notify.service,
-                            sms=auth.sms, upload_root=upload_root or os.path.join(app.root_path, "static"))
+                            sms=auth.sms, upload_root=upload_root or os.path.join(app.root_path, "static"),
+                            identity=getattr(auth, "identity", None))
     ensure_claim_indexes(db)
     app.extensions["claims"] = ClaimsState(config=config, service=service, limiter=limiter)
     app.register_blueprint(bp)

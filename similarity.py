@@ -187,6 +187,37 @@ class ImageSimilarity:
         score = cosine_similarity([emb_a], [emb_b])[0][0]
         return float(score)
 
+    def zero_shot(self, image_paths, labels, template: str = "a photo of {}") -> Optional[dict]:
+        """
+        Phase 2 smart intake: CLIP zero-shot classification. Averages the (cached)
+        embeddings of several views of one item and compares them with a text
+        prompt per label. Returns {label: probability} summing to 1, or None when
+        CLIP is unavailable. Used for category, material, features and contents.
+        """
+        if not self.available or not image_paths or not labels:
+            return None
+        feats = [e for e in (self.embed(p) for p in image_paths) if e is not None]
+        if not feats:
+            return None
+        try:
+            import torch
+            img = np.mean(np.stack(feats), axis=0)
+            img = img / (np.linalg.norm(img) or 1.0)
+            inputs = self.processor(text=[template.format(label) for label in labels],
+                                    return_tensors="pt", padding=True)
+            with torch.no_grad():
+                text = self.model.get_text_features(**inputs)
+                if not isinstance(text, torch.Tensor) and hasattr(text, "pooler_output"):
+                    text = text.pooler_output
+                text = text / text.norm(dim=-1, keepdim=True)
+            logits = 100.0 * (text.cpu().numpy() @ img)
+            probs = np.exp(logits - logits.max())
+            probs = probs / probs.sum()
+            return {label: float(p) for label, p in zip(labels, probs)}
+        except Exception as e:
+            logger.error(f"CLIP zero-shot failed: {e}")
+            return None
+
 
 # ──────────────────────────────────────────────
 # 2.5 OCR EXTRACTOR (OCR.Space)
@@ -225,7 +256,8 @@ class OCRExtractor:
                 response = requests.post(
                     self.api_url,
                     files={'file': (os.path.basename(image_path), f, mime_type)},
-                    data=payload
+                    data=payload,
+                    timeout=20,   # never hang a request (or the intake job) on the OCR service
                 )
 
                 if response.status_code == 200:

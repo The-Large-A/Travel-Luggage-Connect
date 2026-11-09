@@ -21,6 +21,8 @@ Staff (depot login, scoped to the depot holding the item):
     POST /staff/claims/<id>/reissue-token {idVerified: true}
     POST /pickup/verify {token, qrTagId?}
     POST /pickup/complete {token, qrTagId, idChecked: true, staffName?}
+         (Aadhaar claimants: {token, qrTagId, idLast4, idOtp, staffName?} instead of idChecked)
+    POST /pickup/identity/otp {token}  -> OTP to the claimant's Aadhaar-linked mobile
     GET  /staff/items/<foundId>/tag  printable QR tag
     page /staff/claims-desk
 
@@ -290,14 +292,26 @@ def pickup_verify():
     return _json({"ok": True, **result})
 
 
+@bp.route("/pickup/identity/otp", methods=["POST"])
+@require_staff
+@rate_limited
+def pickup_identity_otp():
+    body = _body({"token": str})
+    masked = _call(_svc().send_pickup_otp, _token_input(body), g.staff_depot["phone"], _ip())
+    return _json({"ok": True, "maskedPhone": masked,
+                  "message": f"OTP sent to the passenger's Aadhaar-linked mobile {masked}."})
+
+
 @bp.route("/pickup/complete", methods=["POST"])
 @require_staff
 @rate_limited
 def pickup_complete():
-    body = _body({"token": str, "qrTagId": str, "idChecked": bool, "staffName": str})
+    body = _body({"token": str, "qrTagId": str, "idChecked": bool, "staffName": str,
+                  "idLast4": str, "idOtp": str})
     staff_name = (body.get("staffName") or "").strip()[:60] or None
     claim, item = _call(_svc().complete_pickup, _token_input(body), g.staff_depot["phone"],
-                        body.get("qrTagId") or None, body.get("idChecked"), staff_name)
+                        body.get("qrTagId") or None, body.get("idChecked"), staff_name,
+                        body.get("idLast4"), body.get("idOtp"))
     return _json({"ok": True, "claimId": claim["claimId"], "status": claim["status"],
                   "itemStatus": "handed_over", "qrTagId": item.get("qrTagId")})
 

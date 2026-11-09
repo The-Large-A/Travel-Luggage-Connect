@@ -35,9 +35,21 @@
         </div>
 
         <div id="complete-box" class="hidden space-y-3 p-4 rounded-md bg-slate-50 border border-slate-200">
-            <label class="flex items-center gap-2 text-sm font-bold text-slate-700">
+            <label id="photo-id-row" class="flex items-center gap-2 text-sm font-bold text-slate-700">
                 <input id="id-checked" type="checkbox"> I checked the passenger's photo ID and it matches the name above
             </label>
+            <!-- Phase 2: passengers who logged in with Aadhaar are re-checked here instead -->
+            <div id="aadhaar-row" class="hidden space-y-2">
+                <p class="text-sm font-bold text-slate-700">Identity check (Aadhaar-verified claim)</p>
+                <div class="flex flex-wrap items-end gap-2">
+                    <label class="text-xs font-bold text-slate-600">Last 4 digits the passenger tells you
+                        <input id="id-last4" inputmode="numeric" maxlength="4" class="block mt-1 w-28 h-[40px] px-3 border border-slate-300 rounded-md mono tracking-widest input-focus"></label>
+                    <button id="send-id-otp" type="button" class="btn-gov-secondary text-xs uppercase tracking-widest">Send OTP to passenger</button>
+                    <label class="text-xs font-bold text-slate-600">OTP the passenger received
+                        <input id="id-otp" inputmode="numeric" maxlength="6" class="block mt-1 w-32 h-[40px] px-3 border border-slate-300 rounded-md mono tracking-widest input-focus"></label>
+                </div>
+                <p id="id-otp-info" class="text-[11px] text-slate-500"></p>
+            </div>
             <input id="staff-name" maxlength="60" placeholder="Your name (for the custody log)"
                    class="w-full md:w-1/2 h-[40px] px-3 border border-slate-300 rounded-md input-focus">
             <button id="complete-btn" type="button" class="btn-gov-primary bg-green-700 hover:bg-green-800 text-xs uppercase tracking-widest disabled:opacity-50" disabled>Hand over item</button>
@@ -113,17 +125,35 @@
         if (status !== 200) { showResult(false, 'Cannot verify', (data.error && data.error.message) || 'Error'); return; }
         if (!data.valid) { showResult(false, 'NOT VALID - do not hand over', data.message + ` (${data.reason})`); return; }
         const c = data.claim;
+        identityMode = c.identityCheck || 'photo_id';
+        $('photo-id-row').classList.toggle('hidden', identityMode !== 'photo_id');
+        $('aadhaar-row').classList.toggle('hidden', identityMode === 'photo_id');
+        $('id-last4').value = ''; $('id-otp').value = ''; $('id-otp-info').textContent = '';
+        syncComplete();
         showResult(true, 'VALID pickup code', data.message, [
             ['Name', c.claimerName], ['Phone', c.claimerPhone], ['PNR', c.pnr], ['Report', c.reportId],
             ['Item', c.itemDescription], ['Item tag', c.qrTagId], ['Valid until', c.tokenExpiresAt]]);
         $('complete-box').classList.remove('hidden');
     });
-    $('id-checked').addEventListener('change', () => { $('complete-btn').disabled = !$('id-checked').checked; });
+    let identityMode = 'photo_id';
+    function syncComplete() {
+        $('complete-btn').disabled = identityMode === 'photo_id'
+            ? !$('id-checked').checked
+            : !(/^[0-9]{4}$/.test($('id-last4').value.trim()) && /^[0-9]{6}$/.test($('id-otp').value.trim()));
+    }
+    ['id-checked', 'id-last4', 'id-otp'].forEach(id => $(id).addEventListener('input', syncComplete));
+    $('id-checked').addEventListener('change', syncComplete);
+    $('send-id-otp').addEventListener('click', async () => {
+        const { status, data } = await call('POST', '/pickup/identity/otp', { token: $('token-input').value.trim() });
+        $('id-otp-info').textContent = status === 200 ? data.message : ((data.error && data.error.message) || 'Could not send the OTP.');
+    });
     $('complete-btn').addEventListener('click', async () => {
         $('complete-btn').disabled = true;
-        const { status, data } = await call('POST', '/pickup/complete', {
-            token: $('token-input').value.trim(), qrTagId: $('tag-input').value.trim(),
-            idChecked: $('id-checked').checked, staffName: $('staff-name').value.trim() });
+        const payload = { token: $('token-input').value.trim(), qrTagId: $('tag-input').value.trim(),
+                          staffName: $('staff-name').value.trim() };
+        if (identityMode === 'photo_id') payload.idChecked = $('id-checked').checked;
+        else { payload.idLast4 = $('id-last4').value.trim(); payload.idOtp = $('id-otp').value.trim(); }
+        const { status, data } = await call('POST', '/pickup/complete', payload);
         if (status === 200) {
             showResult(true, 'HANDED OVER', `Custody log updated. Item tag ${data.qrTagId} is now handed over.`);
             $('complete-box').classList.add('hidden');

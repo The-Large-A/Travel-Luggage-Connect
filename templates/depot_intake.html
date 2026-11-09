@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}Add New Lost Item - {{ depot.name }} - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[1200px] mx-auto space-y-6" id="intake-root"
+     data-target="{{ cfg.target_views }}" data-min-views="{{ cfg.min_views_to_save }}"
+     data-max-inside="{{ cfg.max_inside }}" data-max-closeups="{{ cfg.max_closeups }}">
+
+    <div class="flex flex-wrap items-end justify-between gap-4">
+        <div>
+            <a href="{{ url_for('depot_dashboard') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">← Dashboard</a>
+            <h1 class="text-2xl font-heading font-bold text-slate-800 uppercase tracking-wide mt-1">Add New Lost Item</h1>
+            <p class="text-sm text-slate-500">Show the item to the camera. The system picks the best views and builds the record, description and security questions.</p>
+        </div>
+        <div class="text-right">
+            <p class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Camera mode</p>
+            <p id="device-mode" class="text-sm font-bold text-tn-blue"></p>
+            <button type="button" id="device-switch" class="text-[11px] font-bold text-slate-500 hover:text-tn-blue underline"></button>
+        </div>
+    </div>
+
+    <div class="grid lg:grid-cols-12 gap-6">
+        <!-- LEFT: camera and steps -->
+        <div class="lg:col-span-7 space-y-4">
+            <!-- Steps -->
+            <ol class="grid grid-cols-3 gap-2 text-[11px] font-bold uppercase tracking-wide" id="steps">
+                <li><button type="button" data-step="outside" class="step-btn w-full p-2 rounded-md border">1 · Outside</button></li>
+                <li><button type="button" data-step="inside" class="step-btn w-full p-2 rounded-md border">2 · Inside</button></li>
+                <li><button type="button" data-step="closeup" class="step-btn w-full p-2 rounded-md border">3 · Close-ups</button></li>
+            </ol>
+
+            <div class="card-professional overflow-hidden">
+                <div class="relative bg-slate-900 aspect-video">
+                    <video id="video" class="w-full h-full object-contain" playsinline muted></video>
+                    <!-- Centre guide: GrabCut is seeded with this box, so the item should sit inside it -->
+                    <svg class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 56.25" preserveAspectRatio="none">
+                        <rect x="15" y="8.4" width="70" height="39.4" rx="2" fill="none" stroke="white" stroke-width="0.4" stroke-dasharray="2 1.5" opacity="0.8"/>
+                    </svg>
+                    <div id="cam-hint" class="absolute left-3 right-3 bottom-3 text-center text-sm font-bold text-white bg-black/60 rounded-md py-1.5 px-3"></div>
+                    <div id="cam-off" class="hidden absolute inset-0 flex flex-col items-center justify-center text-center text-white p-6 gap-3">
+                        <p class="font-bold">Camera not available</p>
+                        <p id="cam-off-why" class="text-xs text-slate-300 max-w-md"></p>
+                    </div>
+                </div>
+                <div class="p-4 space-y-3">
+                    <p id="step-guide" class="text-sm text-slate-700"></p>
+                    <div>
+                        <div class="flex justify-between text-[11px] font-bold text-slate-500 uppercase">
+                            <span id="coverage-label">Views captured</span><span id="coverage-count">0 / {{ cfg.target_views }}</span>
+                        </div>
+                        <div class="h-2 bg-slate-200 rounded-full overflow-hidden mt-1"><div id="coverage-bar" class="h-full bg-tn-blue transition-all" style="width:0%"></div></div>
+                    </div>
+                    <div class="flex flex-wrap gap-2" id="live-controls">
+                        <button type="button" id="scan-btn" class="btn-gov-primary text-xs uppercase tracking-widest">▶ Start scanning</button>
+                        <button type="button" id="closeup-tag" class="hidden btn-gov-secondary text-xs uppercase tracking-widest">📷 Tag / label close-up</button>
+                        <button type="button" id="closeup-detail" class="hidden btn-gov-secondary text-xs uppercase tracking-widest">📷 Zip pull / mark close-up</button>
+                    </div>
+                    <!-- Fallback when there is no live camera (http on a phone, no webcam): native camera / files -->
+                    <div id="fallback" class="hidden space-y-2">
+                        <p class="text-[11px] text-slate-500">Take or choose photos for this step instead:</p>
+                        <input type="file" id="fallback-input" accept="image/*" capture="environment" multiple
+                               class="w-full text-sm border border-slate-300 rounded-md p-1">
+                    </div>
+                    <div id="thumbs" class="grid grid-cols-6 sm:grid-cols-8 gap-1.5"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT: where it was found + save -->
+        <div class="lg:col-span-5 space-y-4">
+            <div class="card-professional p-5 space-y-4">
+                <h3 class="font-heading font-bold text-slate-800">Where was it found?</h3>
+                <div class="space-y-1.5 relative">
+                    <label class="block text-xs font-bold text-slate-600 uppercase">Route <span class="text-tn-red">*</span></label>
+                    <input type="text" id="route-search" autocomplete="off" placeholder="Search this depot's routes"
+                           class="w-full h-[40px] px-3 border border-slate-300 rounded-md input-focus">
+                    <input type="hidden" id="route-id">
+                    <div id="route-results" class="hidden absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-md shadow-lg max-h-56 overflow-y-auto"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-1.5">
+                        <label class="block text-xs font-bold text-slate-600 uppercase">Bus / service</label>
+                        <select id="trip" disabled class="w-full h-[40px] px-2 border border-slate-300 rounded-md bg-white disabled:bg-slate-100"><option value="">Optional</option></select>
+                    </div>
+                    <div class="space-y-1.5">
+                        <label class="block text-xs font-bold text-slate-600 uppercase">Date found <span class="text-tn-red">*</span></label>
+                        <input type="date" id="found-date" class="w-full h-[40px] px-2 border border-slate-300 rounded-md">
+                    </div>
+                </div>
+                <div class="space-y-1.5">
+                    <label class="block text-xs font-bold text-slate-600 uppercase">Found near seat no.</label>
+                    <input type="number" id="seat-area" min="1" max="80" placeholder="Optional" class="w-full h-[40px] px-2 border border-slate-300 rounded-md">
+                </div>
+                <div id="save-error" role="alert" class="hidden p-3 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200"></div>
+                <button type="button" id="save-btn" class="w-full btn-gov-primary text-sm uppercase tracking-widest disabled:opacity-50" disabled>
+                    Save item automatically
+                </button>
+                <p class="text-[11px] text-slate-500">Saving creates the item record, its QR tag, the custody entry and the security questions, then runs matching.
+                    Only details the system is confident about become questions.</p>
+            </div>
+
+            <!-- Progress + result -->
+            <div id="progress-card" class="hidden card-professional p-5 space-y-2">
+                <div class="flex justify-between text-xs font-bold text-slate-600"><span id="progress-stage">Starting</span><span id="progress-pct">0%</span></div>
+                <div class="h-2.5 bg-slate-200 rounded-full overflow-hidden"><div id="progress-bar" class="h-full bg-green-600 transition-all" style="width:0%"></div></div>
+                <p class="text-[11px] text-slate-500">Writing the description runs on this computer and can take about a minute.</p>
+            </div>
+            <div id="result-card" class="hidden card-professional p-5 space-y-3 border-l-4 border-green-500">
+                <p class="text-sm font-bold text-green-800">✔ Item saved</p>
+                <dl class="grid grid-cols-2 gap-2 text-sm">
+                    <div><dt class="text-[10px] font-bold uppercase text-slate-500">Public description</dt><dd id="res-public" class="font-bold"></dd></div>
+                    <div><dt class="text-[10px] font-bold uppercase text-slate-500">Tag</dt><dd id="res-tag" class="mono font-bold"></dd></div>
+                    <div><dt class="text-[10px] font-bold uppercase text-slate-500">Security questions</dt><dd id="res-questions"></dd></div>
+                    <div><dt class="text-[10px] font-bold uppercase text-slate-500">Matches found</dt><dd id="res-matches" class="font-bold"></dd></div>
+                </dl>
+                <div class="flex flex-wrap gap-2">
+                    <a id="res-print" href="#" class="btn-gov-primary text-xs uppercase tracking-widest">🖨 Print QR tag</a>
+                    <a href="{{ url_for('item_intake.intake_page') }}" class="btn-gov-secondary text-xs uppercase tracking-widest">+ Add another item</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/intake.js') }}"></script>
+{% endblock %}
