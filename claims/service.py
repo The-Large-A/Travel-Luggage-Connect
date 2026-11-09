@@ -183,7 +183,8 @@ class ClaimsService:
     def questions(self, claim):
         if claim["status"] != sm.QUESTIONS_PENDING:
             raise ClaimError(409, "no_questions", "There are no questions to answer for this claim right now.")
-        return [question_view(q) for q in claim["pendingQuestions"]]
+        attrs = self._item(claim).get("private_attributes") or {}
+        return [question_view(q, attrs) for q in claim["pendingQuestions"]]
 
     def submit_answers(self, claim, answers: dict, passenger):
         if claim["status"] != sm.QUESTIONS_PENDING:
@@ -200,7 +201,11 @@ class ClaimsService:
         strict = bool(claim.get("extraAsked"))
         new_outcomes = []
         for qid in pending:
-            ok = qid in attrs and answer_passes(self.answer_key, attrs[qid], answers[qid], self.config, strict)
+            opts = (attrs.get(qid) or {}).get("choices")
+            # A multiple-choice answer must be one of the options shown, verbatim.
+            on_menu = not opts or answers[qid].strip() in opts
+            ok = qid in attrs and on_menu and answer_passes(self.answer_key, attrs[qid], answers[qid],
+                                                            self.config, strict)
             new_outcomes.append({"round": round_no, "question": qid, "outcome": "pass" if ok else "fail"})
         answers.clear()                                  # raw answers are not kept anywhere
         round_outcomes = {o["question"]: o["outcome"] == "pass"

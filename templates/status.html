@@ -88,10 +88,6 @@
             <!-- Details grid -->
             <div class="p-6 grid sm:grid-cols-2 gap-6">
                 <div>
-                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Passenger Name</p>
-                    <p id="result-name" class="font-bold text-slate-800 text-sm"></p>
-                </div>
-                <div>
                     <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Travel Date</p>
                     <p id="result-date" class="font-bold text-slate-800 text-sm mono"></p>
                 </div>
@@ -104,8 +100,8 @@
                     <p id="result-submitted" class="font-bold text-slate-800 text-sm mono"></p>
                 </div>
                 <div class="sm:col-span-2">
-                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Item Description</p>
-                    <p id="result-description" class="text-slate-700 text-sm italic border-l-4 border-slate-200 pl-3"></p>
+                    <p class="text-[11px] text-slate-500">For privacy, the name and item details are shown only to the passenger after
+                        <a href="/passenger/login" class="text-tn-blue font-bold hover:underline">logging in</a>.</p>
                 </div>
                 <!-- Matched depot info (shown only when matched/resolved) -->
                 <div id="result-depot-row" class="sm:col-span-2 hidden">
@@ -237,10 +233,8 @@ function renderResult(data, trackingId) {
     document.getElementById('result-tracking-badge').textContent = trackingId;
 
     // Details
-    setText('result-name',        data.name || '—');
     setText('result-date',        data.date || '—');
     setText('result-route',       data.route_name || '—');
-    setText('result-description', data.description || '—');
     setText('result-submitted',   data.created_at ? data.created_at.slice(0, 16).replace('T', ' ') : '—');
 
     // Depot row (only if matched or resolved)

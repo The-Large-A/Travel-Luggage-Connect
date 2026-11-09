@@ -33,7 +33,7 @@
     <!-- Question wizard -->
     <form id="questions-card" class="hidden card-professional p-6 space-y-4 no-print" novalidate>
         <h2 class="font-heading font-bold text-slate-800 uppercase">Prove it is yours</h2>
-        <p class="text-xs text-slate-500">Answer in English, Tamil or Tanglish. Small spelling mistakes are fine. We never tell you which answer was wrong.</p>
+        <p class="text-xs text-slate-500">Answer in English, Tamil or Tanglish, or pick an option. Small spelling mistakes are fine. We never tell you which answer was wrong.</p>
         <div id="questions-list" class="space-y-4"></div>
         <p id="answers-error" role="alert" class="hidden p-3 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200"></p>
         <button id="submit-answers" type="submit" class="w-full btn-gov-primary text-sm uppercase tracking-widest disabled:opacity-60">Submit answers</button>
@@ -127,15 +127,34 @@
         for (const q of data.questions) {
             const wrap = document.createElement('div');
             wrap.className = 'space-y-1.5';
-            const label = document.createElement('label');
-            label.className = 'block text-sm font-bold text-slate-700';
-            label.htmlFor = 'q-' + q.id;
-            label.textContent = q.text;
-            const input = document.createElement('input');
-            input.type = 'text'; input.id = 'q-' + q.id; input.name = q.id; input.maxLength = 200;
-            input.required = true; input.autocomplete = 'off';
-            input.className = 'w-full h-[44px] px-3 border border-slate-300 rounded-md input-focus';
-            wrap.append(label, input);
+            if (q.options && q.options.length) {
+                // Multiple choice: pick one of the options shown.
+                const legend = document.createElement('p');
+                legend.className = 'block text-sm font-bold text-slate-700';
+                legend.textContent = q.text;
+                const group = document.createElement('div');
+                group.className = 'grid grid-cols-2 gap-2'; group.setAttribute('role', 'radiogroup');
+                group.dataset.question = q.id;
+                q.options.forEach((opt, i) => {
+                    const lab = document.createElement('label');
+                    lab.className = 'flex items-center gap-2 px-3 h-[44px] border border-slate-300 rounded-md cursor-pointer has-[:checked]:border-tn-blue has-[:checked]:bg-blue-50';
+                    const radio = document.createElement('input');
+                    radio.type = 'radio'; radio.name = q.id; radio.value = opt; radio.id = `q-${q.id}-${i}`;
+                    const span = document.createElement('span'); span.className = 'text-sm'; span.textContent = opt;
+                    lab.append(radio, span); group.append(lab);
+                });
+                wrap.append(legend, group);
+            } else {
+                const label = document.createElement('label');
+                label.className = 'block text-sm font-bold text-slate-700';
+                label.htmlFor = 'q-' + q.id;
+                label.textContent = q.text;
+                const input = document.createElement('input');
+                input.type = 'text'; input.id = 'q-' + q.id; input.name = q.id; input.maxLength = 200;
+                input.required = true; input.autocomplete = 'off';
+                input.className = 'w-full h-[44px] px-3 border border-slate-300 rounded-md input-focus';
+                wrap.append(label, input);
+            }
             list.append(wrap);
         }
         $('questions-card').classList.remove('hidden');
@@ -146,13 +165,18 @@
         e.preventDefault();
         $('answers-error').classList.add('hidden');
         const answers = {};
-        for (const input of $('questions-list').querySelectorAll('input')) {
-            if (!input.value.trim()) {
-                $('answers-error').textContent = 'Please answer every question.';
-                $('answers-error').classList.remove('hidden');
-                return;
-            }
+        const missing = () => {
+            $('answers-error').textContent = 'Please answer every question.';
+            $('answers-error').classList.remove('hidden');
+        };
+        for (const input of $('questions-list').querySelectorAll('input[type=text]')) {
+            if (!input.value.trim()) return missing();
             answers[input.name] = input.value;
+        }
+        for (const group of $('questions-list').querySelectorAll('[role=radiogroup]')) {
+            const picked = group.querySelector('input:checked');
+            if (!picked) return missing();
+            answers[group.dataset.question] = picked.value;
         }
         $('submit-answers').disabled = true;
         const { status, data } = await api('POST', `/claims/${ID}/answers`, { answers });

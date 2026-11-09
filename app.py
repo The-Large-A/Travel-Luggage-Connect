@@ -3,7 +3,7 @@ import re
 import math
 import uuid
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import (
@@ -29,9 +29,13 @@ from similarity import (
 from notifications import notification_service
 import transport_schema as T
 from passenger_auth import init_passenger_auth, require_passenger
+from passenger_auth.phone import try_normalize_phone
+from passenger_auth.timeutil import to_db, utcnow, fmt_ist
 from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
 from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
 from claims import encode_private_attributes, new_tag_id
+from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
+                        vocabulary_payload)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -100,6 +104,34 @@ match_notifier = init_match_notify(
 # Feature 3: secure claims and QR pickup tokens (also makes found-item photos staff-only).
 claims_state = init_claims(app, db)
 claims_service = claims_state.service
+
+# Phase 2: identity data (the Aadhaar token + last 4 digits on a report) is
+# deleted this many days after the case closes. The passenger sees the date.
+IDENTITY_PURGE_DAYS = int(os.environ.get('IDENTITY_PURGE_DAYS', '7'))
+LOST_FOUND_HELPLINE = (os.environ.get('LOST_FOUND_HELPLINE') or '').strip()
+STORAGE_LABELS = {k: label for k, label, _ in STORAGE_LOCATIONS}
+
+
+def purge_closed_identities(now=None) -> int:
+    """
+    Two-step retention for identity data on lost reports: when a case closes
+    (resolved or cancelled) stamp identityPurgeAt = now + IDENTITY_PURGE_DAYS;
+    once that passes, remove ownerIdentity. Runs on the notification worker.
+    """
+    now = now or utcnow()
+    lost_collection.update_many(
+        {"ownerIdentity": {"$ne": None}, "status": {"$in": ["resolved", "cancelled"]},
+         "identityPurgeAt": None},
+        {"$set": {"identityPurgeAt": to_db(now + timedelta(days=IDENTITY_PURGE_DAYS))}})
+    res = lost_collection.update_many(
+        {"ownerIdentity": {"$ne": None}, "identityPurgeAt": {"$lte": to_db(now)}},
+        {"$unset": {"ownerIdentity": ""}, "$set": {"identityPurgedAt": to_db(now)}})
+    if res.modified_count:
+        logger.info("Purged identity data from %d closed report(s).", res.modified_count)
+    return res.modified_count
+
+
+app.extensions["match_notify"].worker.add_task(purge_closed_identities)
 
 # AI Models
 logger.info("Initialising AI models...")
@@ -388,14 +420,14 @@ def score_lost_found(found_report: dict, lost: dict, depot: dict):
         lost.get("description", ""), found_report.get("notes", "")
     )
 
-    # Image similarity
+    # Image similarity — a smart-intake item has several keyframes; the best view wins.
     image_score = 0.0
-    found_img = os.path.join("static", found_report["image_path"]) \
-        if found_report.get("image_path") else None
-    if found_img and lost.get("image_path"):
-        image_score = image_sim.similarity(
-            found_img, os.path.join("static", lost["image_path"])
-        )
+    found_imgs = [os.path.join("static", p) for p in (
+        found_report.get("images") or ([found_report["image_path"]] if found_report.get("image_path") else []))]
+    found_img = found_imgs[0] if found_imgs else None
+    if found_imgs and lost.get("image_path"):
+        lost_img = os.path.join("static", lost["image_path"])
+        image_score = max(image_sim.similarity(f, lost_img) for f in found_imgs[:8])
 
     # OCR — reuse the text cached on the found doc; only extract live if a legacy
     # found report has no cached ocr_text.
@@ -413,10 +445,18 @@ def score_lost_found(found_report: dict, lost: dict, depot: dict):
         found_report.get("found_seat_area"), lost.get("seat_no"),
     )
 
-    return UnifiedScorer.compute(
+    score = UnifiedScorer.compute(
         text_score, image_score, route_score=1.0,
         ocr_score=ocr_score, structured_score=structured_score
     )
+    # Phase 2: both sides now pick from the same category list. A clear
+    # disagreement (wallet vs laptop) halves the score; "other" never penalises.
+    lc, fc = lost.get("category"), found_report.get("category")
+    if lc and fc and "other" not in (lc, fc) and lc != fc:
+        score["final"] = round(score["final"] * 0.5, 4)
+        score["is_match"] = score["final"] >= UnifiedScorer.MATCH_THRESHOLD
+        score["categoryMismatch"] = True
+    return score
 
 
 def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
@@ -543,7 +583,61 @@ def get_matches_for_depot(depot_phone: str) -> list:
 def index():
     """Passenger homepage: report form + Leaflet map."""
     last_tracking_id = session.pop('last_tracking_id', None)
-    return render_template('index.html', last_tracking_id=last_tracking_id)
+    return render_template('index.html', last_tracking_id=last_tracking_id,
+                           storage_locations=STORAGE_LOCATIONS, category_labels=CATEGORY_LABELS)
+
+
+# ── Phase 2: journey from the ticket (PNR autofill) ──────────────────────────
+def booking_rows_for(passenger) -> list:
+    """The booking rows this session may report for: same PNR + phone, and only
+    the verified passenger when the session came from an Aadhaar login."""
+    rows = [r for r in db.bookings.find({"pnr": passenger.pnr}).sort("passengerSeq", 1)
+            if try_normalize_phone(r.get("registeredPhone")) == passenger.phone]
+    if passenger.passenger_seqs:
+        rows = [r for r in rows if r.get("passengerSeq") in passenger.passenger_seqs]
+    return rows
+
+
+def journey_from_booking(row):
+    """Resolve a booking row's trip links into a journey, or None if unlinked/invalid."""
+    route = get_route((row or {}).get("routeId"))
+    trip = get_trip((row or {}).get("tripId"))
+    if not route or not trip or trip.get("route_id") != route["route_id"]:
+        return None
+    seq = route.get("stop_sequence", [])
+    b, a = row.get("boardingStopId"), row.get("alightingStopId")
+    if b not in seq or a not in seq or a == b:
+        return None
+    bus = get_bus(trip.get("bus_id")) or {}
+    names = {s["stop_id"]: s["name"] for s in route_stops(route)}
+    return {
+        "route": {"route_id": route["route_id"], "route_no": route.get("route_no"),
+                  "origin_name": route.get("origin_name"), "dest_name": route.get("dest_name"),
+                  "distance_km": route.get("distance_km"), "type": route.get("type"), "via": route.get("via", "")},
+        "tripId": trip["trip_id"], "departureTime": trip.get("departure_time"),
+        "registrationNo": bus.get("registration_no"), "date": row.get("travelDate"),
+        "boardingStopId": b, "boardingStop": names.get(b, ""),
+        "alightingStopId": a, "alightingStop": names.get(a, ""), "seatNo": row.get("seatNo"),
+    }
+
+
+@app.route('/api/passenger/journey')
+@require_passenger
+def api_passenger_journey():
+    """The journeys on the logged-in passenger's ticket, for one-click autofill."""
+    out = []
+    for row in booking_rows_for(g.passenger):
+        out.append({"passengerSeq": row.get("passengerSeq"), "passengerName": row.get("passengerName"),
+                    "journey": journey_from_booking(row)})
+    return jsonify({"ok": True, "pnr": g.passenger.pnr, "passengers": out})
+
+
+@app.route('/api/vocabulary')
+def api_vocabulary():
+    """Shared item vocabulary for the readiness meter, category and storage pickers."""
+    resp = jsonify(vocabulary_payload())
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
 
 
 @app.route('/lost', methods=['POST'])
@@ -553,6 +647,11 @@ def submit_lost():
     Accept a lost luggage report from an OTP-verified passenger (Feature 1).
     The report is owned by the session's (pnr, phone); name and phone come from
     the verified session, never from the form.
+
+    Phase 2: when the ticket is linked to a real trip, route / bus / date /
+    boarding stop / seat come from the booking and the form values are ignored
+    (they cannot be tampered with). Only the alighting stop may differ — people
+    get off early — and that change is recorded.
     """
     passenger = g.passenger
     route_id          = request.form.get('route_id')
@@ -561,10 +660,24 @@ def submit_lost():
     boarding_stop_id  = request.form.get('boarding_stop_id')
     alighting_stop_id = request.form.get('alighting_stop_id')
     date              = request.form.get('date')
-    description       = request.form.get('description')
+    description       = (request.form.get('description') or '').strip()
     phone             = passenger.phone
     name              = passenger.passenger_name
     image_file        = request.files.get('image')
+
+    rows = booking_rows_for(passenger)
+    seq_raw = request.form.get('passenger_seq')
+    row = next((r for r in rows if str(r.get("passengerSeq")) == str(seq_raw)), rows[0] if rows else None)
+    journey = journey_from_booking(row) if row else None
+    autofilled, alighting_changed = [], False
+    if row and row.get("passengerName"):
+        name = row["passengerName"]
+    if journey:
+        route_id, trip_id = journey["route"]["route_id"], journey["tripId"]
+        date, boarding_stop_id, seat_no = journey["date"], journey["boardingStopId"], journey["seatNo"]
+        alighting_stop_id = alighting_stop_id or journey["alightingStopId"]
+        alighting_changed = alighting_stop_id != journey["alightingStopId"]
+        autofilled = ["route", "trip", "date", "boarding", "seat"]
 
     if not all([route_id, trip_id, seat_no, boarding_stop_id,
                 alighting_stop_id, date, description, phone, name]):
@@ -587,6 +700,10 @@ def submit_lost():
         flash('Boarding and alighting stops must be different.', 'error')
         return redirect(url_for('index'))
 
+    if journey and seq.index(alighting_stop_id) < seq.index(boarding_stop_id):
+        flash('You can only get off at a stop after the one you boarded at.', 'error')
+        return redirect(url_for('index'))
+
     date, err = _parse_travel_date(date)
     if err:
         flash(err, 'error')
@@ -607,6 +724,9 @@ def submit_lost():
     if err:
         flash(err, 'error')
         return redirect(url_for('index'))
+    if len(description) > 2000:
+        flash('Please keep the description under 2000 characters.', 'error')
+        return redirect(url_for('index'))
 
     stops_map = {s["stop_id"]: s["name"] for s in route_stops(route)}
 
@@ -616,6 +736,19 @@ def submit_lost():
     image_path = None
     if image_file and image_file.filename:
         image_path = save_uploaded_image(image_file)
+
+    # Phase 2 report details.
+    category = request.form.get('category') or 'other'
+    if category not in ITEM_CATEGORIES:
+        category = 'other'
+    storage_location = request.form.get('storage_location') or None
+    if storage_location not in STORAGE_KEYS:
+        storage_location = None
+    description_original = (request.form.get('description_original') or '').strip()[:1000] or None
+    description_lang = request.form.get('description_lang')
+    description_lang = description_lang if description_lang in ('ta', 'hi') and description_original else 'en'
+    owner_identity = ({"type": "aadhaar", "token": passenger.id_token, "last4": passenger.id_last4}
+                      if passenger.auth_method == "aadhaar" and passenger.id_token else None)
 
     report = {
         "request_id":        request_id,    # Unique internal ID (used in matches)
@@ -643,7 +776,18 @@ def submit_lost():
         "status":            "pending",     # pending | matched | resolved | cancelled
         "matched_depot":     None,
         "matched_at":        None,
-        "created_at":        datetime.now().isoformat()
+        "created_at":        datetime.now().isoformat(),
+        # Phase 2
+        "category":            category,
+        "storageLocation":     storage_location,
+        "descriptionOriginal": description_original,   # e.g. the spoken Tamil, kept beside the English
+        "descriptionLang":     description_lang,
+        "detailScore":         detail_slots(description)["score"],
+        "ticketType":          "pnr",
+        "passengerSeq":        (row or {}).get("passengerSeq"),
+        "autofilled":          autofilled,
+        "alightingChanged":    alighting_changed,
+        "ownerIdentity":       owner_identity,          # token + last 4 only; purged after the case closes
     }
 
     lost_collection.insert_one(report)
@@ -728,46 +872,40 @@ def depot_dashboard():
     )
 
 
-@app.route('/depot/found', methods=['POST'])
-def submit_found():
-    """Accept a found luggage report from depot staff and run AI matching."""
-    if 'depot_phone' not in session:
-        flash('Please login to submit found reports.', 'error')
-        return redirect(url_for('depot_login_page'))
+class FoundReportError(ValueError):
+    """A found-item submission was refused; the message is shown to staff."""
 
-    depot_phone = session['depot_phone']
-    depots      = get_depots()
-    depot       = depots.get(depot_phone)
 
-    if not depot:
-        flash('Invalid depot session.', 'error')
-        return redirect(url_for('depot_login_page'))
+def create_found_report(depot: dict, data: dict, image_paths=(), raw_attributes=None,
+                        attribute_choices=None, extra=None):
+    """
+    Validate and store a found item, log custody, and run matching. Shared by
+    the manual depot form and the Phase 2 smart-intake camera scan, so both
+    produce identical records. Returns (report, number_of_matches).
 
-    route_id        = request.form.get('route_id')
-    trip_id         = request.form.get('trip_id') or None
-    date            = request.form.get('date')
-    notes           = request.form.get('notes')
-    public_description = (request.form.get('public_description') or '').strip()
-    category        = request.form.get('category') or 'other'
-    found_seat_area = request.form.get('found_seat_area') or None
+    data: route_id, trip_id, date, notes, public_description, category, found_seat_area.
+    raw_attributes: plain private answers — hashed here, never stored in clear.
+    attribute_choices: {attribute: [option labels]} for multiple-choice questions.
+    extra: additional fields (e.g. captureMode, attributes, draftId, ocr_text).
+    """
+    route_id = data.get('route_id')
+    trip_id = data.get('trip_id') or None
+    date = data.get('date')
+    notes = data.get('notes')
+    public_description = (data.get('public_description') or '').strip()
+    category = data.get('category') or 'other'
+    found_seat_area = data.get('found_seat_area') or None
 
     if not all([route_id, date, notes, public_description]):
-        flash('Please fill in all required fields.', 'error')
-        return redirect(url_for('depot_dashboard'))
-
+        raise FoundReportError('Please fill in all required fields.')
     route = get_route(route_id)   # transport route
     if not route:
-        flash('Invalid route selected.', 'error')
-        return redirect(url_for('depot_dashboard'))
-
+        raise FoundReportError('Invalid route selected.')
     if not depot_serves_route(depot, route):
-        flash('This depot does not serve the selected route.', 'error')
-        return redirect(url_for('depot_dashboard'))
-
+        raise FoundReportError('This depot does not serve the selected route.')
     date, err = _parse_travel_date(date)
     if err:
-        flash(err, 'error')
-        return redirect(url_for('depot_dashboard'))
+        raise FoundReportError(err)
 
     # Optional trip → carries the bus the item came off, for exact matching.
     # When supplied it must actually run on the selected route (it drives the
@@ -777,29 +915,27 @@ def submit_found():
     if trip_id:
         trip = get_trip(trip_id)
         if not trip or trip.get("route_id") != route_id:
-            flash('The selected bus/service does not run on that route.', 'error')
-            return redirect(url_for('depot_dashboard'))
+            raise FoundReportError('The selected bus/service does not run on that route.')
     bus_id = trip.get("bus_id") if trip else None
 
     if found_seat_area is not None:
         capacity = (get_bus(bus_id) or {}).get("capacity") if bus_id else None
         found_seat_area, err = _parse_seat(found_seat_area, capacity)
         if err:
-            flash(err, 'error')
-            return redirect(url_for('depot_dashboard'))
+            raise FoundReportError(err)
 
-    # Handle optional image upload
-    image_path = None
-    if 'image' in request.files:
-        image_path = save_uploaded_image(request.files['image'])
+    image_paths = [p for p in image_paths if p]
+    image_path = image_paths[0] if image_paths else None
+    extra = dict(extra or {})
 
-    # Pre-compute CLIP embedding + OCR text now so BOTH matching directions are
-    # fast later and never re-hit the OCR API for this image.
-    ocr_text = ""
-    if image_path:
-        if image_sim.available:
-            image_sim.embed(os.path.join("static", image_path))
-        ocr_text = ocr_ext.extract_text(os.path.join("static", image_path))
+    # Pre-compute CLIP embeddings + OCR text now so BOTH matching directions are
+    # fast later and never re-hit the OCR API for these images.
+    if image_sim.available:
+        for p in image_paths:
+            image_sim.embed(os.path.join("static", p))
+    ocr_text = extra.pop("ocr_text", None)
+    if ocr_text is None:
+        ocr_text = ocr_ext.extract_text(os.path.join("static", image_path)) if image_path else ""
 
     found_id = uuid.uuid4().hex   # Unique internal ID for this found report
 
@@ -807,14 +943,13 @@ def submit_found():
     if category not in ITEM_CATEGORIES:
         category = 'other'
     private_attributes = encode_private_attributes(
-        {name: request.form.get(f'attr_{name}') for name in PRIVATE_ATTRIBUTES},
-        category, public_description, claims_service.answer_key,
-        claims_state.config.fuzzy_min_token_length)
+        raw_attributes or {}, category, public_description, claims_service.answer_key,
+        claims_state.config.fuzzy_min_token_length, choices=attribute_choices)
 
     report = {
         "found_id":        found_id,          # Unique internal ID (used in matches)
         "id":              found_id[:8],      # Short display ID
-        "depot_phone":     depot_phone,
+        "depot_phone":     depot["phone"],
         "depot_name":      depot["name"],
         "route_id":        route_id,
         "route_no":        route.get("route_no"),
@@ -830,16 +965,55 @@ def submit_found():
         "private_attributes": private_attributes,          # hashed claim-verification answers
         "qrTagId":         new_tag_id(),                   # printed and stuck on the item
         "image_path":      image_path,
+        "images":          image_paths,       # every photo (smart intake keeps several keyframes)
         "ocr_text":        ocr_text,          # cached; reused by the matcher
         "status":          "open",
         "created_at":      datetime.now().isoformat()
     }
+    report.update(extra)
 
     found_collection.insert_one(report)
-    claims_service.record_item_logged(report, depot_phone)
+    claims_service.record_item_logged(report, depot["phone"])
 
     # Run AI matching and SAVE results to matches collection
-    n = compute_and_save_matches(report, depot)
+    return report, compute_and_save_matches(report, depot)
+
+
+@app.route('/depot/found', methods=['POST'])
+def submit_found():
+    """Accept a found luggage report from depot staff (manual form) and run AI matching."""
+    if 'depot_phone' not in session:
+        flash('Please login to submit found reports.', 'error')
+        return redirect(url_for('depot_login_page'))
+
+    depot_phone = session['depot_phone']
+    depots      = get_depots()
+    depot       = depots.get(depot_phone)
+
+    if not depot:
+        flash('Invalid depot session.', 'error')
+        return redirect(url_for('depot_login_page'))
+
+    image_path = None
+    if 'image' in request.files:
+        image_path = save_uploaded_image(request.files['image'])
+
+    try:
+        _, n = create_found_report(
+            depot,
+            {k: request.form.get(k) for k in ('route_id', 'trip_id', 'date', 'notes', 'public_description',
+                                              'category', 'found_seat_area')},
+            image_paths=[image_path] if image_path else [],
+            raw_attributes={name: request.form.get(f'attr_{name}') for name in PRIVATE_ATTRIBUTES},
+            extra={"captureMode": "manual"})
+    except FoundReportError as e:
+        if image_path:                       # do not leave an orphan upload behind
+            try:
+                os.remove(os.path.join("static", image_path))
+            except OSError:
+                pass
+        flash(str(e), 'error')
+        return redirect(url_for('depot_dashboard'))
 
     if n > 0:
         flash(f'Found report submitted! {n} potential match(es) found!', 'success')
@@ -863,17 +1037,103 @@ def api_status(tracking_id: str):
     if not report:
         return jsonify({"found": False, "message": "Tracking ID not found."}), 404
 
+    # Privacy (Phase 2): anyone holding a tracking ID — e.g. whoever sees a
+    # printed loss slip — gets the status only, never the passenger's name or
+    # item description. The owner sees those after logging in.
     return jsonify({
         "found":         True,
         "tracking_id":   report.get("tracking_id"),
         "status":        report.get("status", "pending"),
-        "name":          report.get("name"),
         "route_name":    report.get("route_name"),
         "date":          report.get("date"),
-        "description":   report.get("description"),
         "matched_depot": report.get("matched_depot"),
         "matched_at":    report.get("matched_at"),
         "created_at":    report.get("created_at")
+    })
+
+
+def _owned_report(tracking_id: str, passenger):
+    report = lost_collection.find_one({"tracking_id": (tracking_id or "").strip().upper()})
+    if not report or report.get("ownerPnr") != passenger.pnr or report.get("ownerPhone") != passenger.phone:
+        return None
+    return report
+
+
+@app.route('/passenger/reports/<tracking_id>/slip')
+@require_passenger(page=True)
+def loss_slip(tracking_id):
+    """Printable loss acknowledgment slip with a QR that opens the public verify page."""
+    report = _owned_report(tracking_id, g.passenger)
+    if not report:
+        return render_template('passenger_not_found.html'), 404
+    verify_url = url_for('verify_report', tracking_id=report["tracking_id"], _external=True)
+    stops = {s["stop_id"]: s["name"] for s in route_stops(get_route(report.get("route_id")) or {})}
+    return render_template(
+        'loss_slip.html', report=report, verify_url=verify_url,
+        qr_svg=claims_service.qr_svg(verify_url),
+        storage_label=STORAGE_LABELS.get(report.get("storageLocation")),
+        category_label=CATEGORY_LABELS.get(report.get("category") or "other", ("", ""))[0],
+        boarding=stops.get(report.get("boarding_stop_id"), report.get("source")),
+        alighting=stops.get(report.get("alighting_stop_id"), report.get("destination")),
+        issued_at=fmt_ist(utcnow()))
+
+
+@app.route('/verify/<tracking_id>')
+def verify_report(tracking_id):
+    """Public check that a loss slip is genuine: status, route and date only."""
+    report = lost_collection.find_one({"tracking_id": (tracking_id or "").strip().upper()})
+    return render_template('verify_report.html', report=report, tracking_id=tracking_id.upper()[:20]), \
+        (200 if report else 404)
+
+
+@app.route('/api/transport/routes/<route_id>/downstream')
+def api_route_downstream(route_id):
+    """
+    Where a forgotten item can travel (Phase 2 luggage-path map). The bus keeps
+    going after the passenger alights, so the item can only be at the alighting
+    stop or later in the direction of travel. Returns the travelled stops, the
+    downstream stops, the depots along the downstream part (with public contact
+    numbers) and the route's terminus and home depot for the 72-hour timeline.
+    """
+    route = get_route(route_id)
+    if not route:
+        return jsonify({"error": "Route not found"}), 404
+    stops = route_stops(route)
+    ids = [s["stop_id"] for s in stops]
+    alighting = request.args.get('alighting')
+    if alighting not in ids:
+        return jsonify({"error": "alighting must be a stop on this route"}), 400
+    boarding = request.args.get('boarding')
+    i, j = (ids.index(boarding) if boarding in ids else 0), ids.index(alighting)
+    forward = i <= j
+    travelled = stops[i:j + 1] if forward else stops[j:i + 1][::-1]
+    downstream = stops[j:] if forward else stops[:j + 1][::-1]
+
+    def stop_view(s):
+        return {"stop_id": s["stop_id"], "name": s["name"], "lat": s.get("lat"), "lon": s.get("lon")}
+
+    def depot_view(d, role):
+        return {"name": d.get("name"), "city": d.get("city"), "lat": d.get("lat"), "lon": d.get("lon"),
+                "publicPhone": d.get("publicPhone"), "whatsapp": d.get("whatsapp"), "role": role}
+
+    depots, seen = [], set()
+    for s in downstream:
+        city = (s.get("city") or "").strip()
+        if not city:
+            continue
+        d = depots_collection.find_one({"city": {"$regex": f"^{re.escape(city)}$", "$options": "i"}})
+        if d and d.get("phone") not in seen:
+            seen.add(d.get("phone"))
+            depots.append(depot_view(d, "downstream"))
+    terminus = depots[-1] if depots else None
+    home = depots_collection.find_one({"depot_code": route.get("operating_depot_code")}) \
+        if route.get("operating_depot_code") else None
+    return jsonify({
+        "route_id": route_id, "direction": "forward" if forward else "reverse",
+        "travelled": [stop_view(s) for s in travelled], "downstream": [stop_view(s) for s in downstream],
+        "depots": depots, "terminusDepot": terminus,
+        "homeDepot": depot_view(home, "home") if home else None,
+        "helpline": LOST_FOUND_HELPLINE or None,
     })
 
 
@@ -1075,18 +1335,28 @@ def api_transport_seatmap(trip_id):
     return jsonify(seatmap)
 
 
+GROQ_MODEL = (os.environ.get("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
+TRANSLATE_LANGS = {"ta": "Tamil", "hi": "Hindi"}
+
+
 @app.route('/api/translate', methods=['POST'])
 def api_translate():
-    """Translate incoming text to English using Groq."""
+    """
+    Translate a spoken/typed description into English using Groq. The browser
+    keeps the original text and shows both; on any failure it simply keeps the
+    original, so a translation outage never loses what the passenger said.
+    (The old model id llama3-8b-8192 was retired; set GROQ_MODEL to override.)
+    """
     data = request.get_json(silent=True) or {}
-    if 'text' not in data:
+    text = data.get('text')
+    if not isinstance(text, str) or not text.strip():
         return jsonify({'error': 'No text provided'}), 400
-
-    text = data['text']
+    text = text.strip()[:1000]
+    source = TRANSLATE_LANGS.get(data.get('lang'), "Tamil, Hindi, Tanglish or another Indian language")
 
     groq_api_key = os.environ.get("GROQ_API_KEY")
     if not groq_api_key:
-        return jsonify({'error': 'Groq API key not configured.'}), 500
+        return jsonify({'error': 'Translation is not configured on this server.', 'code': 'not_configured'}), 503
 
     try:
         groq_client = groq.Groq(api_key=groq_api_key)
@@ -1094,20 +1364,21 @@ def api_translate():
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a professional translator for a lost luggage recovery system. Translate the user's text into clear, concise English. Only output the translated English text, nothing else."
+                    "content": ("You are a translator for a bus lost-luggage service. The user's text is in "
+                                f"{source}. Translate it into clear, concise English, keeping colours, brands, "
+                                "names and item details exactly. Output only the English translation.")
                 },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "user", "content": text}
             ],
-            model="llama3-8b-8192",
+            model=GROQ_MODEL,
+            temperature=0,
+            max_tokens=400,
         )
         translated_text = chat_completion.choices[0].message.content.strip()
-        return jsonify({'translated': translated_text})
+        return jsonify({'translated': translated_text, 'model': GROQ_MODEL})
     except Exception as e:
-        logger.error(f"Translation error: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Translation error ({GROQ_MODEL}): {e}")
+        return jsonify({'error': 'Translation failed. Your original text is kept.', 'code': 'failed'}), 502
 
 @app.route('/api/match/resolve', methods=['POST'])
 def resolve_match():
@@ -1205,4 +1476,9 @@ if __name__ == '__main__':
     # Debug is OFF by default (the Werkzeug debugger is an RCE surface if exposed).
     # Enable locally with FLASK_DEBUG=1.
     debug = os.environ.get('FLASK_DEBUG') == '1'
-    app.run(debug=debug, use_reloader=False, port=5003)
+    # Phone cameras (getUserMedia) only work on HTTPS or localhost. For testing
+    # the depot scan from a phone on the same Wi-Fi, run with HTTPS_ADHOC=1
+    # HOST=0.0.0.0 (self-signed certificate: the phone shows a one-time warning).
+    ssl_context = 'adhoc' if os.environ.get('HTTPS_ADHOC') == '1' else None
+    app.run(debug=debug, use_reloader=False, host=os.environ.get('HOST', '127.0.0.1'),
+            port=int(os.environ.get('PORT', '5003')), ssl_context=ssl_context)

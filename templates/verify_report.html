@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Verify Loss Slip - TN Bus Lost &amp; Found{% endblock %}
+
+{% block content %}
+<div class="max-w-[560px] mx-auto py-8">
+    <div class="card-professional p-8 space-y-4 text-center">
+        <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Loss slip verification</p>
+        <p class="mono text-2xl font-bold tracking-widest">{{ tracking_id }}</p>
+        {% if report %}
+        <p class="inline-block px-3 py-1 rounded-full bg-green-100 text-green-800 text-xs font-bold uppercase">✔ Genuine report</p>
+        <dl class="grid grid-cols-2 gap-3 text-sm text-left pt-2">
+            <div><dt class="text-[10px] font-bold uppercase text-slate-500">Status</dt><dd class="font-bold capitalize">{{ report.status }}</dd></div>
+            <div><dt class="text-[10px] font-bold uppercase text-slate-500">Travel date</dt><dd class="mono">{{ report.date }}</dd></div>
+            <div class="col-span-2"><dt class="text-[10px] font-bold uppercase text-slate-500">Route</dt><dd>{{ report.route_no }} · {{ report.route_name }}</dd></div>
+            <div class="col-span-2"><dt class="text-[10px] font-bold uppercase text-slate-500">Reported</dt><dd class="mono">{{ (report.created_at or '')[:10] }}</dd></div>
+        </dl>
+        <p class="text-[11px] text-slate-500">Names and item details are not shown here for privacy.</p>
+        {% else %}
+        <p class="inline-block px-3 py-1 rounded-full bg-red-100 text-tn-red text-xs font-bold uppercase">No report with this ID</p>
+        <p class="text-sm text-slate-600">This slip does not match any report. Check the ID, or contact the depot.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

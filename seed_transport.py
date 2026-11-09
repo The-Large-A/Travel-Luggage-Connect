@@ -377,6 +377,14 @@ def main():
         depots.append(doc)
         depot_by_code[code] = doc
 
+    # Public contact numbers (fictitious) for the passenger contact drawer. The
+    # login `phone` above is a staff credential and is never shown to passengers.
+    # Derived by hashing (not `random`) so the seeded network stays byte-identical.
+    for d in depots:
+        h = int(hashlib.md5(d["depot_code"].encode()).hexdigest(), 16)
+        d["publicPhone"] = f"+91 44 {2400 + h % 600:04d} {h // 600 % 9000 + 1000:04d}"
+        d["whatsapp"] = f"+91 94450 {h // 7 % 90000 + 10000:05d}" if d["is_staffed"] else None
+
     # ── Stops: 137 real-city majors + synthetic minors to reach 3000 ─────────
     major_cities = sorted({canon(r[k]) for r in rows for k in ("From", "To")})
     # include depot home cities & synthetic towns as majors too

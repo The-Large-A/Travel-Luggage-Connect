@@ -207,6 +207,53 @@ function renderSingleRoute(map, route, color = '#1F6FB2') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: luggage path — where a forgotten item can travel
+// ─────────────────────────────────────────────────────────────────────────────
+let _luggagePathLayer = null;
+
+/**
+ * Overlay the passenger's journey on the selected route: the travelled part in
+ * solid green, the part the bus still drives after the passenger got off in
+ * thick amber (a forgotten item rides along), and pulsing amber pins on the
+ * depots downstream where it can be handed in. Solid lines are used on purpose:
+ * on this map a dashed line already means "straight-line fallback".
+ *
+ * @param {L.Map} map
+ * @param {Object} data - from /api/transport/routes/<id>/downstream
+ */
+function renderLuggagePath(map, data) {
+  if (_luggagePathLayer) {
+    map.removeLayer(_luggagePathLayer);
+    _luggagePathLayer = null;
+  }
+  if (!data || !data.travelled) return;
+  const pts = list => list.filter(s => s.lat != null && s.lon != null).map(s => [s.lat, s.lon]);
+  const group = L.layerGroup();
+  const travelled = pts(data.travelled);
+  const downstream = pts(data.downstream);
+  if (travelled.length > 1) {
+    L.polyline(travelled, { color: '#2E7D32', weight: 7, opacity: 0.9 })
+      .bindTooltip('Your journey', { sticky: true }).addTo(group);
+  }
+  if (downstream.length > 1) {
+    L.polyline(downstream, { color: '#D4960A', weight: 9, opacity: 0.75 })
+      .bindTooltip('The bus continued here — your item may have too', { sticky: true }).addTo(group);
+  }
+  (data.depots || []).forEach(d => {
+    if (d.lat == null || d.lon == null) return;
+    const phone = d.publicPhone ? `<br><a href="tel:${d.publicPhone.replace(/\s/g, '')}">${d.publicPhone}</a>` : '';
+    L.marker([d.lat, d.lon], { icon: depotIcon('#D4960A'), title: d.name, zIndexOffset: 500 })
+      .addTo(group)
+      .bindPopup(`<b style="color:#B45309">${d.name}</b><br>` +
+                 `<span style="font-size:11px">Downstream depot: items left on this bus are logged here.</span>${phone}`);
+  });
+  group.addTo(map);
+  _luggagePathLayer = group;
+  const all = travelled.concat(downstream);
+  if (all.length) map.fitBounds(L.latLngBounds(all), { padding: [40, 40] });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Add pulse animation keyframe (injected once into document <head>)
 // ─────────────────────────────────────────────────────────────────────────────
 (function injectPulseAnimation() {

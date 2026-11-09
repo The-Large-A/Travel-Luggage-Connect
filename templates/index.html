@@ -3,6 +3,7 @@
 {% block title %}Report Lost Luggage / தொலைந்த உடைமை அறிக்கை - TN Bus Lost &amp; Found{% endblock %}
 
 {% block content %}
+{% set pax = nav_passenger() if nav_passenger is defined else None %}
 <div class="max-w-[1200px] mx-auto space-y-8">
 
     <!-- ═══════════════════════════════════════════════════════════
@@ -36,10 +37,14 @@
                 </div>
             </div>
         </div>
-        <a href="{{ url_for('status_page') }}?id={{ last_tracking_id }}"
-           class="btn-gov-primary text-xs uppercase tracking-wide flex-shrink-0">
-            Track this Report →
-        </a>
+        <div class="flex flex-wrap gap-2 flex-shrink-0">
+            {% if pax %}
+            <a href="{{ url_for('loss_slip', tracking_id=last_tracking_id) }}"
+               class="btn-gov-secondary text-xs uppercase tracking-wide">📄 Loss slip (print)</a>
+            {% endif %}
+            <a href="{{ url_for('status_page') }}?id={{ last_tracking_id }}"
+               class="btn-gov-primary text-xs uppercase tracking-wide">Track this Report →</a>
+        </div>
     </div>
     {% endif %}
 
@@ -56,23 +61,38 @@
                     <p class="font-tamil text-sm mt-1">தொலைந்த உடைமை அறிக்கை</p>
                 </div>
 
-                <form action="{{ url_for('submit_lost') }}" method="POST" enctype="multipart/form-data" class="p-8 space-y-6" id="lost-form">
+                <form action="{{ url_for('submit_lost') }}" method="POST" enctype="multipart/form-data" class="p-6 sm:p-8 space-y-6" id="lost-form">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    {% set pax = nav_passenger() if nav_passenger is defined else None %}
+                    <input type="hidden" name="passenger_seq" id="passenger_seq">
                     {% if pax %}
-                    <!-- Reporter identity comes from the OTP-verified session (Feature 1) -->
+                    <!-- Reporter identity comes from the OTP-verified session (Feature 1 / Phase 2) -->
                     <div class="p-4 rounded-md bg-blue-50 border border-blue-100 flex items-center justify-between gap-4">
                         <div>
                             <p class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Reporting as / பயணி</p>
                             <p class="font-bold text-slate-800">{{ pax.passenger_name }}</p>
-                            <p class="text-xs mono text-slate-500">PNR {{ pax.pnr }}</p>
+                            <p class="text-xs mono text-slate-500">PNR {{ pax.pnr }}
+                                {% if pax.auth_method == 'aadhaar' %}· <span class="text-green-700 font-bold">✔ Aadhaar verified (XXXX XXXX {{ pax.id_last4 }})</span>{% endif %}</p>
                         </div>
                         <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">My reports</a>
                     </div>
+
+                    <!-- Journey from the ticket (filled automatically when the PNR is linked to a trip) -->
+                    <div id="ticket-panel" class="hidden p-4 rounded-md bg-green-50 border border-green-200 space-y-2">
+                        <div class="flex items-center justify-between gap-3">
+                            <p class="text-sm font-bold text-green-800">⚡ Journey filled from your ticket</p>
+                            <span class="text-[10px] font-bold uppercase tracking-wider text-green-700 bg-white border border-green-200 rounded-full px-2 py-0.5">PNR {{ pax.pnr }}</span>
+                        </div>
+                        <p class="text-[11px] text-green-900">Route, bus, date, boarding stop and seat come from the booking and cannot be changed.
+                            If you got off at a different stop, change <b>Alighted at</b> below.</p>
+                        <div id="pax-picker" class="hidden">
+                            <label for="pax_select" class="block text-[11px] font-bold text-slate-600 uppercase">Who lost the item?</label>
+                            <select id="pax_select" class="mt-1 w-full h-[36px] px-2 border border-green-300 rounded-md text-sm bg-white"></select>
+                        </div>
+                    </div>
                     {% else %}
                     <div id="login-required" class="p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
-                        <p class="font-bold">Please log in with your PNR to report a lost item.</p>
-                        <p class="text-xs mt-1">We verify your booking with a one-time password so that only you can see your report and its matches.</p>
+                        <p class="font-bold">Please log in to report a lost item.</p>
+                        <p class="text-xs mt-1">Verify with your Aadhaar / VID (then your ticket's PNR), or with your PNR and mobile number. Only you will see your report and its matches.</p>
                         <a href="{{ url_for('passenger_auth.login_page', next='/') }}" class="inline-block mt-3 btn-gov-primary text-xs uppercase tracking-widest">Passenger Login</a>
                     </div>
                     {% endif %}
@@ -81,9 +101,10 @@
                     <div class="space-y-1.5 relative">
                         <label class="block text-sm font-bold text-slate-700">
                             Bus Route / பேருந்து வழித்தடம் <span class="text-tn-red">*</span>
+                            <span class="ticket-pill hidden ml-1 text-[10px] font-bold uppercase text-green-700 bg-green-100 rounded-full px-2 py-0.5">✔ From ticket</span>
                         </label>
                         <input type="text" id="route_search" autocomplete="off"
-                               class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus"
+                               class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus read-only:bg-slate-100"
                                placeholder="Search route no. or city (e.g. Chennai, 831UD, Madurai)">
                         <input type="hidden" name="route_id" id="route_id">
                         <!-- Autocomplete results -->
@@ -98,9 +119,10 @@
                         <div class="space-y-1.5">
                             <label class="block text-sm font-bold text-slate-700">
                                 Bus / Service / பேருந்து சேவை <span class="text-tn-red">*</span>
+                                <span class="ticket-pill hidden ml-1 text-[10px] font-bold uppercase text-green-700 bg-green-100 rounded-full px-2 py-0.5">✔</span>
                             </label>
                             <select name="trip_id" id="trip_select" required disabled
-                                    class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus disabled:bg-slate-100 disabled:text-slate-400">
+                                    class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus disabled:bg-slate-100 disabled:text-slate-500">
                                 <option value="">Select a route first</option>
                             </select>
                         </div>
@@ -108,9 +130,10 @@
                         <div class="space-y-1.5">
                             <label class="block text-sm font-bold text-slate-700">
                                 Travel Date / பயணத் தேதி <span class="text-tn-red">*</span>
+                                <span class="ticket-pill hidden ml-1 text-[10px] font-bold uppercase text-green-700 bg-green-100 rounded-full px-2 py-0.5">✔</span>
                             </label>
                             <input type="date" name="date" id="date_input" required
-                                   class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium input-focus">
+                                   class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium input-focus read-only:bg-slate-100">
                         </div>
                     </div>
 
@@ -119,9 +142,10 @@
                         <div class="space-y-1.5">
                             <label class="block text-sm font-bold text-slate-700">
                                 Boarded At / ஏறிய இடம் <span class="text-tn-red">*</span>
+                                <span class="ticket-pill hidden ml-1 text-[10px] font-bold uppercase text-green-700 bg-green-100 rounded-full px-2 py-0.5">✔</span>
                             </label>
                             <select name="boarding_stop_id" id="boarding_select" required disabled
-                                    class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus disabled:bg-slate-100 disabled:text-slate-400">
+                                    class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus disabled:bg-slate-100 disabled:text-slate-500">
                                 <option value="">Select stop</option>
                             </select>
                         </div>
@@ -133,6 +157,7 @@
                                     class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus disabled:bg-slate-100 disabled:text-slate-400">
                                 <option value="">Select stop</option>
                             </select>
+                            <p id="alight_changed" class="hidden text-[11px] font-bold text-amber-700">Changed from your ticket — the map shows where the bus went next.</p>
                         </div>
                     </div>
 
@@ -140,18 +165,42 @@
                     <div class="space-y-1.5">
                         <label class="block text-sm font-bold text-slate-700">
                             Your Seat / இருக்கை எண் <span class="text-tn-red">*</span>
+                            <span class="ticket-pill hidden ml-1 text-[10px] font-bold uppercase text-green-700 bg-green-100 rounded-full px-2 py-0.5">✔</span>
                         </label>
                         <input type="hidden" name="seat_no" id="seat_no">
-                        <div id="seat_wrap" class="border border-slate-200 rounded-md p-4 bg-slate-50">
+                        <div id="seat_wrap" class="border border-slate-200 rounded-md p-4 bg-slate-50 overflow-x-auto">
                             <p id="seat_hint" class="text-[11px] text-slate-500 font-medium italic text-center py-3">
                                 Select a bus/service above to choose your seat.
                             </p>
                             <div id="seat_map" class="hidden"></div>
                             <p id="seat_selected" class="hidden mt-3 text-center text-xs font-bold text-tn-blue"></p>
                         </div>
-                        <p class="text-[11px] text-slate-500 font-medium italic">
-                            Pick where you were sitting — it helps locate items left nearby.
-                        </p>
+                    </div>
+
+                    <!-- Where the item was kept on the bus -->
+                    <fieldset class="space-y-1.5">
+                        <legend class="block text-sm font-bold text-slate-700">Where was it kept? / எங்கே வைத்தீர்கள்?</legend>
+                        <div class="flex flex-wrap gap-2">
+                            {% for key, label, tamil in storage_locations %}
+                            <label data-storage-pill
+                                   class="cursor-pointer select-none px-3 py-1.5 rounded-full border border-slate-300 text-xs font-bold text-slate-600 bg-white">
+                                <input type="radio" name="storage_location" value="{{ key }}" class="sr-only">
+                                {{ label }} <span class="font-tamil font-normal text-slate-400">/ {{ tamil }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p class="text-[11px] text-slate-500 italic">Tells depot staff where on the bus to search.</p>
+                    </fieldset>
+
+                    <!-- Item category -->
+                    <div class="space-y-1.5">
+                        <label for="category_select" class="block text-sm font-bold text-slate-700">What did you lose? / பொருள் வகை</label>
+                        <select name="category" id="category_select"
+                                class="w-full h-[40px] px-3 border border-slate-300 rounded-md font-medium bg-white input-focus">
+                            {% for key, labels in category_labels.items() %}
+                            <option value="{{ key }}" {% if key == 'bag' %}selected{% endif %}>{{ labels[0] }} / {{ labels[1] }}</option>
+                            {% endfor %}
+                        </select>
                     </div>
 
                     <!-- Description -->
@@ -159,23 +208,23 @@
                         <label class="block text-sm font-bold text-slate-700">
                             Luggage Description / உடைமை விவரம் <span class="text-tn-red">*</span>
                         </label>
-                        
+
                         <!-- Voice Assistant UI -->
-                        <div class="flex items-center gap-3 bg-slate-50 p-2 rounded-md border border-slate-200 mb-2">
+                        <div class="flex flex-wrap items-center gap-3 bg-slate-50 p-2 rounded-md border border-slate-200 mb-2">
                             <select id="voice_lang" class="h-8 px-2 text-sm border-slate-300 rounded-md font-medium text-slate-700 bg-white shadow-sm">
                                 <option value="ta-IN">Tamil (தமிழ்)</option>
                                 <option value="hi-IN">Hindi (हिंदी)</option>
                                 <option value="en-US">English</option>
                             </select>
-                            
-                            <button type="button" id="voice_btn" 
+
+                            <button type="button" id="voice_btn"
                                     class="flex items-center gap-2 h-8 px-3 rounded-full bg-slate-200 text-slate-700 hover:bg-tn-blue hover:text-white transition-colors duration-200 font-bold text-sm">
                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                                 </svg>
                                 <span>Tap to Speak</span>
                             </button>
-                            
+
                             <div id="voice_status" class="text-xs font-semibold text-slate-500 hidden items-center gap-1">
                                 <span class="relative flex h-2.5 w-2.5">
                                   <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-tn-red opacity-75"></span>
@@ -185,27 +234,45 @@
                             </div>
                         </div>
 
-                        <textarea name="description" id="desc_input" required rows="3"
-                                  class="w-full p-4 border border-slate-300 rounded-md font-medium input-focus resize-none"
-                                  placeholder="Describe your lost item in detail or use the microphone to speak..."></textarea>
-                        <p class="text-[11px] text-slate-500 font-medium italic">
-                            More detail = better AI match accuracy.
-                        </p>
+                        <!-- Spoken text and its English translation, side by side -->
+                        <div id="voice_preview" class="hidden grid sm:grid-cols-2 gap-2 text-xs">
+                            <div class="p-2 rounded-md bg-white border border-slate-200">
+                                <p class="text-[10px] font-bold uppercase text-slate-500">🎙️ You said / பேசியது</p>
+                                <p id="voice_original" class="mt-1 text-slate-700 font-tamil"></p>
+                            </div>
+                            <div class="p-2 rounded-md bg-white border border-slate-200">
+                                <p class="text-[10px] font-bold uppercase text-slate-500">🤖 English (edit below if needed)</p>
+                                <p id="voice_english" class="mt-1 text-slate-700"></p>
+                            </div>
+                            <p id="voice_notice" class="sm:col-span-2 hidden text-amber-700 font-bold"></p>
+                        </div>
+                        <input type="hidden" name="description_original" id="description_original">
+                        <input type="hidden" name="description_lang" id="description_lang">
+
+                        <textarea name="description" id="desc_input" required rows="3" maxlength="2000"
+                                  class="w-full p-4 border border-slate-300 rounded-md font-medium input-focus resize-y"
+                                  placeholder="e.g. Navy blue Wildcraft backpack, laptop charger and a steel tiffin inside, red tag on the zip"></textarea>
+
+                        <!-- Match readiness meter -->
+                        <div id="readiness" class="hidden space-y-1.5" role="meter" aria-label="Description detail" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <div class="flex items-center justify-between text-[11px] font-bold">
+                                <span class="text-slate-500 uppercase tracking-wide">AI match readiness</span>
+                                <span id="readiness_label" class="text-slate-700"></span>
+                            </div>
+                            <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="readiness_bar" class="h-full rounded-full" style="width:4%"></div></div>
+                            <div id="readiness_chips" class="flex flex-wrap gap-1.5"></div>
+                            <p id="category_hints" class="text-[11px] text-slate-500 italic"></p>
+                        </div>
                     </div>
 
-                    <!-- Image Upload -->
+                    <!-- Image Upload (enhanced into a dropzone with preview + compression) -->
                     <div class="space-y-1.5">
                         <label class="block text-sm font-bold text-slate-700">
-                            Upload Reference Image (Optional) / புகைப்படம் <span class="text-slate-400 font-normal">(விருப்பத் தேர்வு)</span>
+                            Reference photo (optional) / புகைப்படம் <span class="text-slate-400 font-normal">(விருப்பத் தேர்வு)</span>
                         </label>
-                        <input type="file" name="image" accept="image/*"
-                               class="w-full text-sm font-medium text-slate-500
-                                      file:mr-4 file:py-2 file:px-4
-                                      file:rounded-md file:border-0
-                                      file:text-sm file:font-bold
-                                      file:bg-tn-blue file:text-white
-                                      hover:file:bg-tn-blue/90
-                                      border border-slate-300 rounded-md p-1 input-focus">
+                        <input type="file" name="image" accept="image/*" data-photo-input
+                               class="w-full text-sm font-medium text-slate-500 border border-slate-300 rounded-md p-1">
+                        <p class="text-[11px] text-slate-500">An older photo of the item with you in it works too.</p>
                     </div>
 
                     <div class="pt-2">
@@ -233,7 +300,7 @@
                 <div class="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
                     <div>
                         <h3 class="text-sm font-bold text-slate-700 uppercase tracking-wide">Bus Route Map</h3>
-                        <p class="text-[11px] text-slate-400 mt-0.5">Select a route to view its path and stops</p>
+                        <p id="map_caption" class="text-[11px] text-slate-400 mt-0.5">Select a route to view its path and stops</p>
                     </div>
                     <svg class="w-5 h-5 text-tn-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -242,6 +309,26 @@
                 </div>
                 <!-- The map renders inside this div -->
                 <div id="route-map" class="tn-map" style="height:360px;"></div>
+                <div id="map_legend" class="hidden px-4 py-2 flex flex-wrap gap-4 text-[11px] font-bold text-slate-600 border-t border-slate-100">
+                    <span class="flex items-center gap-1.5"><span class="inline-block w-6 h-1.5 rounded bg-green-700"></span>Your journey</span>
+                    <span class="flex items-center gap-1.5"><span class="inline-block w-6 h-2 rounded bg-amber-500"></span>Bus continued (item may be here)</span>
+                </div>
+            </div>
+
+            <!-- Where is my item likely to be? (luggage path + contacts) -->
+            <div id="path-card" class="hidden card-professional p-5 border-l-4 border-amber-500 space-y-3">
+                <h3 class="font-heading font-bold text-slate-800 text-base">Where your item can be now</h3>
+                <ol class="space-y-2 text-sm">
+                    <li class="flex gap-3"><span class="h-6 w-6 rounded-full bg-amber-500 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">1</span>
+                        <span><b>Within 72 hours:</b> <span id="path-72h"></span></span></li>
+                    <li class="flex gap-3"><span class="h-6 w-6 rounded-full bg-slate-400 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">2</span>
+                        <span><b>After that:</b> moved to the regional lost-property store. Your report stays active and matches it there too.</span></li>
+                </ol>
+                <div>
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Depots after your stop</p>
+                    <ul id="path-depots" class="divide-y divide-slate-100 text-sm"></ul>
+                </div>
+                <p id="path-helpline" class="hidden text-xs font-bold text-slate-700"></p>
             </div>
 
             <!-- Guidelines -->
@@ -255,9 +342,9 @@
                 </h3>
                 <div class="space-y-4">
                     {% for step, text in [
-                        ('1', 'Submit this form with your travel details. You will receive a Tracking ID.'),
-                        ('2', 'Our AI system matches your description against depot found-item reports.'),
-                        ('3', 'If matched, the depot contacts you to collect your belongings.')
+                        ('1', 'Log in with Aadhaar / VID and your ticket PNR. Your journey fills in automatically.'),
+                        ('2', 'Describe the item. Our AI matches it against depot found-item reports.'),
+                        ('3', 'If matched, you answer a few questions only the owner knows, then collect it with a QR code.')
                     ] %}
                     <div class="flex gap-4">
                         <div class="h-6 w-6 rounded-full bg-tn-blue text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
@@ -283,11 +370,14 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/photo-input.js') }}"></script>
+<script src="{{ url_for('static', filename='js/report-form.js') }}"></script>
 <script>
 // ═══════════════════════════════════════════════════════
 // Cascading selector: Route → Service/Bus → Stops → Seat
 // (backed by the /api/transport/* catalog)
 // ═══════════════════════════════════════════════════════
+const LOGGED_IN     = {{ 'true' if pax else 'false' }};
 const routeSearch   = document.getElementById('route_search');
 const routeResults  = document.getElementById('route_results');
 const routeSummary  = document.getElementById('route_summary');
@@ -296,19 +386,23 @@ const tripSelect    = document.getElementById('trip_select');
 const boardingSelect  = document.getElementById('boarding_select');
 const alightingSelect = document.getElementById('alighting_select');
 const dateInput     = document.getElementById('date_input');
+let ticketJourney = null;   // the journey from the PNR, when linked
 
 // Cap date at today
 dateInput.max = new Date().toISOString().split('T')[0];
 
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+
 // ── Route autocomplete (debounced) ─────────────────────────────────────────
 let _searchTimer = null;
 routeSearch.addEventListener('input', function () {
+    if (this.readOnly) return;
     const q = this.value.trim();
     clearTimeout(_searchTimer);
     _searchTimer = setTimeout(() => runRouteSearch(q), 220);
 });
 routeSearch.addEventListener('focus', function () {
-    if (routeResults.children.length) routeResults.classList.remove('hidden');
+    if (!this.readOnly && routeResults.children.length) routeResults.classList.remove('hidden');
 });
 document.addEventListener('click', (e) => {
     if (!routeResults.contains(e.target) && e.target !== routeSearch) {
@@ -326,14 +420,14 @@ function runRouteSearch(q) {
                     '<div class="px-3 py-2 text-xs text-slate-400 font-medium">No matching routes.</div>';
             }
             routes.forEach(rt => {
-                const via = rt.via ? ` <span class="text-slate-400">(${rt.via})</span>` : '';
+                const via = rt.via ? ` <span class="text-slate-400">(${esc(rt.via)})</span>` : '';
                 const item = document.createElement('div');
                 item.className =
                     'px-3 py-2 text-sm hover:bg-blue-50 cursor-pointer border-b border-slate-50';
                 item.innerHTML =
-                    `<span class="font-bold text-tn-blue mono">${rt.route_no}</span> · ` +
-                    `${rt.origin_name} → ${rt.dest_name}${via} ` +
-                    `<span class="text-[10px] text-slate-400">${rt.distance_km} km · ${rt.type}</span>`;
+                    `<span class="font-bold text-tn-blue mono">${esc(rt.route_no)}</span> · ` +
+                    `${esc(rt.origin_name)} → ${esc(rt.dest_name)}${via} ` +
+                    `<span class="text-[10px] text-slate-400">${esc(rt.distance_km)} km · ${esc(rt.type)}</span>`;
                 item.addEventListener('click', () => selectRoute(rt));
                 routeResults.appendChild(item);
             });
@@ -342,7 +436,7 @@ function runRouteSearch(q) {
         .catch(err => console.error('route search failed', err));
 }
 
-// ── Route selected → load stops, trips, map ─────────────────────────────────
+// ── Route selected → load stops, trips, map (resolves when both are loaded) ─
 function selectRoute(rt) {
     routeIdInput.value = rt.route_id;
     routeSearch.value  = `${rt.route_no} · ${rt.origin_name} → ${rt.dest_name}`;
@@ -355,17 +449,18 @@ function selectRoute(rt) {
     resetSeat();
     tripSelect.disabled = true;
     tripSelect.innerHTML = '<option value="">Loading services…</option>';
+    if (window._leafletMap) renderLuggagePath(window._leafletMap, null);
+    document.getElementById('path-card').classList.add('hidden');
+    document.getElementById('map_legend').classList.add('hidden');
 
-    // Stops + map
-    fetch(`/api/transport/routes/${rt.route_id}`)
+    const stopsLoaded = fetch(`/api/transport/routes/${rt.route_id}`)
         .then(r => r.json())
         .then(detail => {
             populateStops(detail.stops);
             if (window._leafletMap) renderSingleRoute(window._leafletMap, detail);
         });
 
-    // Trips (bus + timing)
-    fetch(`/api/transport/routes/${rt.route_id}/trips`)
+    const tripsLoaded = fetch(`/api/transport/routes/${rt.route_id}/trips`)
         .then(r => r.json())
         .then(trips => {
             tripSelect.innerHTML = '<option value="">Select a service</option>';
@@ -383,6 +478,7 @@ function selectRoute(rt) {
             });
             tripSelect.disabled = false;
         });
+    return Promise.all([stopsLoaded, tripsLoaded]);
 }
 
 function populateStops(stops) {
@@ -390,24 +486,23 @@ function populateStops(stops) {
     boardingSelect.innerHTML  = blank;
     alightingSelect.innerHTML = blank;
     stops.forEach(s => {
-        const o1 = new Option(s.name, s.stop_id);
-        const o2 = new Option(s.name, s.stop_id);
-        boardingSelect.add(o1);
-        alightingSelect.add(o2);
+        boardingSelect.add(new Option(s.name, s.stop_id));
+        alightingSelect.add(new Option(s.name, s.stop_id));
     });
     boardingSelect.disabled  = false;
     alightingSelect.disabled = false;
 }
 
 // ── Service selected → render the visual seat map ───────────────────────────
-tripSelect.addEventListener('change', function () {
+function loadSeatmap(tripId) {
     resetSeat();
-    if (!this.value) return;
-    fetch(`/api/transport/trips/${this.value}/seatmap`)
+    if (!tripId) return Promise.resolve();
+    return fetch(`/api/transport/trips/${tripId}/seatmap`)
         .then(r => r.json())
         .then(renderSeatMap)
         .catch(err => console.error('seatmap failed', err));
-});
+}
+tripSelect.addEventListener('change', function () { loadSeatmap(this.value); });
 
 const seatNoInput  = document.getElementById('seat_no');
 const seatMapEl     = document.getElementById('seat_map');
@@ -437,7 +532,7 @@ function renderSeatMap(sm) {
     const legend = document.createElement('div');
     legend.className = 'flex items-center justify-between mb-3 text-[10px] font-bold text-slate-400 uppercase tracking-wide';
     legend.innerHTML =
-        `<span>🚍 Front · ${sm.registration_no || ''}</span><span>${sm.capacity} seats · ${sm.pattern}</span>`;
+        `<span>🚍 Front · ${esc(sm.registration_no || '')}</span><span>${sm.capacity} seats · ${esc(sm.pattern)}</span>`;
     seatMapEl.appendChild(legend);
 
     const grid = document.createElement('div');
@@ -470,6 +565,17 @@ function renderSeatMap(sm) {
     seatMapEl.appendChild(grid);
 }
 
+function selectSeat(n) {
+    seatMapEl.querySelectorAll('.seat-btn').forEach(x => {
+        const on = Number(x.dataset.seat) === Number(n);
+        x.classList.toggle('bg-tn-blue', on); x.classList.toggle('text-white', on); x.classList.toggle('border-tn-blue', on);
+        x.classList.toggle('bg-white', !on); x.classList.toggle('text-slate-600', !on);
+    });
+    seatNoInput.value = n;
+    seatSelected.textContent = `Selected seat: ${n}`;
+    seatSelected.classList.remove('hidden');
+}
+
 function seatButton(n) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -477,22 +583,92 @@ function seatButton(n) {
     b.dataset.seat = n;
     b.className =
         'seat-btn w-8 h-8 text-[11px] font-bold rounded border border-slate-300 bg-white ' +
-        'text-slate-600 hover:border-tn-blue hover:bg-blue-50 transition-colors';
-    b.addEventListener('click', () => {
-        seatMapEl.querySelectorAll('.seat-btn').forEach(x => {
-            x.classList.remove('bg-tn-blue', 'text-white', 'border-tn-blue');
-            x.classList.add('bg-white', 'text-slate-600');
-        });
-        b.classList.remove('bg-white', 'text-slate-600');
-        b.classList.add('bg-tn-blue', 'text-white', 'border-tn-blue');
-        seatNoInput.value = n;
-        seatSelected.textContent = `Selected seat: ${n}`;
-        seatSelected.classList.remove('hidden');
-    });
+        'text-slate-600 hover:border-tn-blue hover:bg-blue-50 transition-colors disabled:hover:bg-white disabled:cursor-not-allowed';
+    b.disabled = !!ticketJourney;
+    b.addEventListener('click', () => selectSeat(n));
     return b;
 }
 
-// ── Guard submit until the new required selections are present ──────────────
+// ═══════════════════════════════════════════════════════
+// Phase 2: fill the journey from the ticket (PNR)
+// ═══════════════════════════════════════════════════════
+async function applyJourney(p) {
+    const j = p.journey;
+    ticketJourney = j;
+    document.getElementById('passenger_seq').value = p.passengerSeq;
+    await selectRoute(j.route);
+    tripSelect.value = j.tripId;
+    await loadSeatmap(j.tripId);
+    selectSeat(j.seatNo);
+    dateInput.value = j.date;
+    boardingSelect.value = j.boardingStopId;
+    alightingSelect.value = j.alightingStopId;
+    // Locked: the server takes these from the booking regardless of the form.
+    routeSearch.readOnly = true; dateInput.readOnly = true;
+    tripSelect.disabled = true; boardingSelect.disabled = true;
+    document.querySelectorAll('.ticket-pill').forEach(el => el.classList.remove('hidden'));
+    document.getElementById('ticket-panel').classList.remove('hidden');
+    document.getElementById('alight_changed').classList.add('hidden');
+    updateLuggagePath();
+}
+
+async function loadTicketJourney() {
+    if (!LOGGED_IN) return;
+    try {
+        const data = await (await fetch('/api/passenger/journey', { credentials: 'same-origin' })).json();
+        const linked = (data.passengers || []).filter(p => p.journey);
+        if (!linked.length) return;
+        if (linked.length > 1) {
+            const sel = document.getElementById('pax_select');
+            linked.forEach(p => sel.add(new Option(`${p.passengerName} — seat ${p.journey.seatNo}`, p.passengerSeq)));
+            sel.addEventListener('change', () => applyJourney(linked.find(p => String(p.passengerSeq) === sel.value)));
+            document.getElementById('pax-picker').classList.remove('hidden');
+        }
+        await applyJourney(linked[0]);
+    } catch (e) { console.warn('journey autofill unavailable', e); }
+}
+
+// ═══════════════════════════════════════════════════════
+// Phase 2: luggage path map + where-is-it-now card
+// ═══════════════════════════════════════════════════════
+function updateLuggagePath() {
+    const route = routeIdInput.value, a = alightingSelect.value, b = boardingSelect.value;
+    if (ticketJourney) {
+        document.getElementById('alight_changed').classList.toggle('hidden', a === ticketJourney.alightingStopId);
+    }
+    if (!route || !a || !b || a === b) return;
+    fetch(`/api/transport/routes/${route}/downstream?boarding=${encodeURIComponent(b)}&alighting=${encodeURIComponent(a)}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (!data) return;
+            if (window._leafletMap) renderLuggagePath(window._leafletMap, data);
+            document.getElementById('map_legend').classList.remove('hidden');
+            document.getElementById('map_caption').textContent = 'Green: your journey · Amber: where the bus went after you got off';
+            const where = [data.terminusDepot && `${data.terminusDepot.name} (end of this bus's run)`,
+                           data.homeDepot && data.homeDepot.name !== (data.terminusDepot || {}).name && `${data.homeDepot.name} (the bus's home depot)`]
+                .filter(Boolean);
+            document.getElementById('path-72h').textContent = where.length ? where.join(' or ') : 'the depot at the end of this bus\'s run.';
+            const list = document.getElementById('path-depots');
+            list.innerHTML = '';
+            (data.depots.length ? data.depots : [{ name: 'No staffed depot listed on this stretch', none: true }]).forEach(d => {
+                const li = document.createElement('li');
+                li.className = 'py-1.5 flex items-center justify-between gap-2';
+                if (d.none) { li.innerHTML = `<span class="text-slate-400 text-xs">${esc(d.name)}</span>`; list.appendChild(li); return; }
+                const tel = d.publicPhone ? `<a class="text-tn-blue font-bold text-xs mono" href="tel:${esc(d.publicPhone.replace(/\s/g, ''))}">📞 ${esc(d.publicPhone)}</a>` : '';
+                const wa = d.whatsapp ? `<a class="text-green-700 font-bold text-xs" target="_blank" rel="noopener" href="https://wa.me/${esc(d.whatsapp.replace(/\D/g, ''))}">WhatsApp</a>` : '';
+                li.innerHTML = `<span class="font-bold text-slate-700">${esc(d.name)}</span><span class="flex gap-3">${tel}${wa}</span>`;
+                list.appendChild(li);
+            });
+            const help = document.getElementById('path-helpline');
+            if (data.helpline) { help.textContent = `State Lost & Found helpline: ${data.helpline}`; help.classList.remove('hidden'); }
+            document.getElementById('path-card').classList.remove('hidden');
+        })
+        .catch(err => console.warn('luggage path unavailable', err));
+}
+boardingSelect.addEventListener('change', updateLuggagePath);
+alightingSelect.addEventListener('change', updateLuggagePath);
+
+// ── Guard submit until the required selections are present ─────────────────
 document.getElementById('lost-form').addEventListener('submit', function (e) {
     const missing =
         !routeIdInput.value || !tripSelect.value ||
@@ -517,7 +693,7 @@ function copyTrackingId() {
 }
 
 // ═══════════════════════════════════════════════════════
-// Voice Assistant Logic
+// Voice Assistant: speak in Tamil/Hindi, see the original AND the English
 // ═══════════════════════════════════════════════════════
 const voiceBtn = document.getElementById('voice_btn');
 const voiceLang = document.getElementById('voice_lang');
@@ -530,7 +706,7 @@ if (voiceBtn) {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = true;
-        
+
         let isRecording = false;
         let finalTranscript = '';
         let originalDescValue = '';
@@ -540,7 +716,6 @@ if (voiceBtn) {
                 recognition.stop();
                 return;
             }
-            
             recognition.lang = voiceLang.value;
             finalTranscript = '';
             originalDescValue = descInput.value;
@@ -565,9 +740,8 @@ if (voiceBtn) {
                     interimTranscript += event.results[i][0].transcript;
                 }
             }
-            
             // Show live preview while they speak
-            let currentText = finalTranscript + interimTranscript;
+            const currentText = finalTranscript + interimTranscript;
             descInput.value = originalDescValue ? originalDescValue + ' ' + currentText : currentText;
         };
 
@@ -579,14 +753,24 @@ if (voiceBtn) {
             voiceBtn.classList.replace('text-white', 'text-slate-700');
             voiceBtn.querySelector('span').textContent = 'Tap to Speak';
 
-            if (!finalTranscript.trim()) return;
-
+            const spoken = finalTranscript.trim();
+            if (!spoken) return;
             const lang = voiceLang.value;
             if (lang === 'en-US') {
+                descInput.dispatchEvent(new Event('voice-text'));
                 return; // Already English, and already appended during onresult
             }
-            
-            // Translate the finalized block of text
+
+            const preview = document.getElementById('voice_preview');
+            const notice = document.getElementById('voice_notice');
+            document.getElementById('voice_original').textContent = spoken;
+            document.getElementById('voice_english').textContent = 'Translating…';
+            notice.classList.add('hidden');
+            preview.classList.remove('hidden');
+            const origField = document.getElementById('description_original');
+            origField.value = (origField.value ? origField.value + ' ' : '') + spoken;
+            document.getElementById('description_lang').value = lang.split('-')[0];
+
             voiceBtn.querySelector('span').textContent = 'Translating...';
             try {
                 const response = await fetch('/api/translate', {
@@ -595,17 +779,23 @@ if (voiceBtn) {
                         'Content-Type': 'application/json',
                         'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content
                     },
-                    body: JSON.stringify({ text: finalTranscript.trim(), lang: lang.split('-')[0] })
+                    body: JSON.stringify({ text: spoken, lang: lang.split('-')[0] })
                 });
                 const data = await response.json();
                 if (data.translated) {
+                    document.getElementById('voice_english').textContent = data.translated;
                     descInput.value = originalDescValue ? originalDescValue + ' ' + data.translated : data.translated;
+                } else {
+                    throw new Error(data.error || 'translation failed');
                 }
             } catch (err) {
-                console.error('Translation error:', err);
-                alert("Translation failed. Please try again or type in English.");
+                // Keep what the passenger said; never lose it to a translation outage.
+                document.getElementById('voice_english').textContent = '—';
+                notice.textContent = 'Translation is unavailable right now, so your own words are kept in the box below. You can also type in English.';
+                notice.classList.remove('hidden');
             } finally {
                 voiceBtn.querySelector('span').textContent = 'Tap to Speak';
+                descInput.dispatchEvent(new Event('voice-text'));
             }
         };
 
@@ -621,9 +811,10 @@ if (voiceBtn) {
 
 // ═══════════════════════════════════════════════════════
 // Initialise Leaflet map (via map.js)
-// The map now draws the SELECTED route (see renderSingleRoute in selectRoute).
+// The map draws the SELECTED route (see renderSingleRoute in selectRoute).
 // ═══════════════════════════════════════════════════════
 const _map = initMap('route-map');
 window._leafletMap = _map;
+loadTicketJourney();
 </script>
 {% endblock %}

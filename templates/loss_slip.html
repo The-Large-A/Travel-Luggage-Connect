@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Loss Acknowledgment Slip {{ report.tracking_id }} - TN Bus Lost &amp; Found{% endblock %}
+
+{% block head %}
+<style>
+    @media print {
+        header, footer, nav, .no-print { display: none !important; }
+        body { background: #fff !important; }
+        .slip { box-shadow: none !important; border: 1px solid #000 !important; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-[720px] mx-auto py-6 space-y-4">
+    <div class="no-print flex items-center justify-between">
+        <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">← My reports</a>
+        <button type="button" onclick="window.print()" class="btn-gov-primary text-xs uppercase tracking-widest">Print / Save as PDF</button>
+    </div>
+
+    <div class="slip card-professional p-8 space-y-6 bg-white">
+        <div class="flex items-start justify-between gap-6 border-b-2 border-slate-800 pb-4">
+            <div>
+                <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Tamil Nadu State Transport · Lost &amp; Found</p>
+                <h1 class="text-xl font-heading font-bold text-slate-900 uppercase">Loss Acknowledgment Slip</h1>
+                <p class="font-tamil text-sm text-slate-600">இழப்பு ஒப்புகைச் சீட்டு</p>
+            </div>
+            <div class="text-right">
+                <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Tracking ID</p>
+                <p class="mono text-2xl font-bold tracking-widest text-slate-900">{{ report.tracking_id }}</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-[1fr_auto] gap-6">
+            <dl class="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Passenger</dt><dd class="font-bold">{{ report.name }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">PNR</dt><dd class="mono font-bold">{{ report.ownerPnr }}</dd></div>
+                <div class="col-span-2"><dt class="text-[10px] font-bold uppercase text-slate-500">Route</dt><dd class="font-bold">{{ report.route_no }} · {{ report.route_name }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Bus</dt><dd class="mono">{{ report.bus_registration or '—' }}{% if report.departure_time %} · {{ report.departure_time }}{% endif %}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Travel date</dt><dd class="mono">{{ report.date }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Boarded at</dt><dd>{{ boarding or '—' }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Got off at</dt><dd>{{ alighting or '—' }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Seat</dt><dd class="mono">{{ report.seat_no }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Item kept</dt><dd>{{ storage_label or 'Not stated' }}</dd></div>
+                <div class="col-span-2"><dt class="text-[10px] font-bold uppercase text-slate-500">Item</dt>
+                    <dd>{{ category_label }}{% if report.description %} — {{ report.description[:160] }}{% endif %}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Reported</dt><dd class="mono">{{ report.created_at[:16].replace('T', ' ') }}</dd></div>
+                <div><dt class="text-[10px] font-bold uppercase text-slate-500">Slip issued</dt><dd class="mono">{{ issued_at }}</dd></div>
+            </dl>
+            <div class="text-center">
+                <div class="w-36 h-36 [&>svg]:w-full [&>svg]:h-full">{{ qr_svg | safe }}</div>
+                <p class="text-[9px] text-slate-500 mt-1 max-w-[9rem] break-all">Scan to verify this slip</p>
+            </div>
+        </div>
+
+        <div class="text-[11px] text-slate-600 border-t border-slate-200 pt-4 space-y-1">
+            <p><b>Self-declaration.</b> This slip records that the passenger above reported a lost item to the TNSTC
+                Lost &amp; Found system. It is not proof of ownership and not a police report. The item is released
+                only after ownership checks and an identity check at the depot.</p>
+            <p>Verify at <span class="mono break-all">{{ verify_url }}</span></p>
+        </div>
+    </div>
+</div>
+{% endblock %}
