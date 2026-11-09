@@ -23,6 +23,7 @@ sys.path.insert(0, ROOT)
 from passenger_auth import init_passenger_auth                       # noqa: E402
 from passenger_auth.config import AuthConfig                          # noqa: E402
 from passenger_auth.sms import SmsProvider                            # noqa: E402
+from passenger_auth.identity import seed_mock_uidai                   # noqa: E402
 from seed_bookings import seed_bookings                               # noqa: E402
 
 TEST_SECRET = "test-signing-secret-0123456789-abcdefghijklmnopqrstuvwxyz"
@@ -108,7 +109,8 @@ def clock():
 @pytest.fixture
 def db(clock, atomic_mongomock):
     database = mongomock.MongoClient()["tn_bus_lost_found_test"]
-    seed_bookings(database, now=clock())
+    seed_bookings(database, now=clock(), signing_secret=TEST_SECRET)
+    seed_mock_uidai(database, TEST_SECRET)
     return database
 
 

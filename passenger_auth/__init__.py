@@ -1,5 +1,7 @@
 """
 Feature 1 — OTP-based passenger authentication (PNR + registered mobile).
+Phase 2 adds mock Aadhaar / VID login with the PNR as proof of journey
+(identity.py, identity_service.py); PNR + mobile stays as the fallback.
 
 Wire into the app with:
 
@@ -23,6 +25,7 @@ from flask import request
 
 from .bookings import BOOKINGS
 from .config import AuthConfig, ConfigError
+from .identity_service import ID_COOKIE, IdentityService, ensure_identity_indexes
 from .ratelimit import COUNTERS, EVENTS, RateLimiter
 from .routes import bp, current_passenger, require_passenger
 from .service import OTP_SESSIONS, OtpService
@@ -44,6 +47,7 @@ class PassengerAuthState:
     sms: SmsProvider
     sessions: SessionManager
     otp: OtpService
+    identity: IdentityService
 
 
 def ensure_auth_indexes(db) -> None:
@@ -76,9 +80,11 @@ def init_passenger_auth(app, db, config=None, sms_provider=None, clock=None, env
         db=db, config=config, clock=clock, sms=sms,
         sessions=SessionManager(db, config, clock),
         otp=OtpService(db, config, sms, limiter, clock),
+        identity=IdentityService(db, config, sms, limiter, clock),
     )
     app.extensions["passenger_auth"] = state
     ensure_auth_indexes(db)
+    ensure_identity_indexes(db)
     app.register_blueprint(bp)
     app.add_template_filter(fmt_ist, "ist")
 
@@ -93,7 +99,9 @@ def init_passenger_auth(app, db, config=None, sms_provider=None, clock=None, env
                 return state.sessions.load(token)
             except SessionError:
                 return None
-        return {"nav_passenger": nav_passenger}
+        def nav_identity():
+            return state.identity.load_session(request.cookies.get(ID_COOKIE))
+        return {"nav_passenger": nav_passenger, "nav_identity": nav_identity}
 
     logger.info("Passenger OTP auth enabled (SMS provider: %s).", sms.name)
     return state

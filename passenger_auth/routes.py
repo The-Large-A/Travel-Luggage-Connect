@@ -7,6 +7,12 @@ Flask blueprint: the /auth API, the passenger pages, and `require_passenger`.
     GET  /auth/me                               → 200 current passenger (requires session)
     GET  /passenger/login                       → login + OTP screens
     GET  /passenger                             → passenger Lost & Found home (requires session)
+
+  Phase 2 — mock Aadhaar / VID login, then the PNR as proof of journey:
+    POST /auth/id/otp/request {idNumber, consent:"yes"} → 202 generic
+    POST /auth/id/otp/verify  {idNumber, otp}           → 200 + identity cookie
+    POST /auth/id/link        {pnr}                     → 200 + passenger session (same person only)
+    GET  /auth/id/me                                    → 200 current identity (masked)
 """
 import functools
 from urllib.parse import urlencode
@@ -17,6 +23,8 @@ from flask_wtf.csrf import CSRFError
 
 from .bookings import find_eligible_booking
 from .errors import AuthError
+from .identity import mask_id
+from .identity_service import GENERIC_ID_MESSAGE, ID_COOKIE
 from .phone import mask_phone
 from .service import GENERIC_REQUEST_MESSAGE
 from .sessions import COOKIE_NAME, SessionError
@@ -63,6 +71,8 @@ def _passenger_json(passenger, booking=None) -> dict:
         "pnr": passenger.pnr,
         "passengerName": passenger.passenger_name,
         "maskedPhone": mask_phone(passenger.phone),
+        "authMethod": passenger.auth_method,
+        "maskedId": mask_id(passenger.id_last4) if passenger.id_last4 else None,
     }
     out = {"ok": True, "passenger": body,
            "session": {"expiresAt": iso_utc(passenger.expires_at),
@@ -185,9 +195,78 @@ def otp_verify():
 def logout():
     state = _state()
     state.sessions.revoke_token(request.cookies.get(COOKIE_NAME))
+    state.identity.revoke_token(request.cookies.get(ID_COOKIE))
     resp = _json({"ok": True, "message": "Logged out."}, 200)
     state.sessions.clear_cookie(resp)
+    _clear_id_cookie(resp)
     return resp
+
+
+# ── Phase 2: Aadhaar / VID identity, then PNR as proof of journey ────────────
+def _set_id_cookie(response, token):
+    cfg = _state().config
+    response.set_cookie(ID_COOKIE, token, max_age=cfg.session_ttl_seconds, httponly=True,
+                        secure=cfg.cookie_secure, samesite=cfg.cookie_samesite, path="/")
+
+
+def _clear_id_cookie(response):
+    cfg = _state().config
+    response.delete_cookie(ID_COOKIE, path="/", httponly=True, secure=cfg.cookie_secure,
+                           samesite=cfg.cookie_samesite)
+
+
+def _identity_json(identity) -> dict:
+    return {"name": identity.name, "maskedId": identity.masked_id, "idType": identity.kind,
+            "linkedPhone": mask_phone(identity.linked_phone),
+            "expiresAt": iso_utc(identity.expires_at)}
+
+
+def current_identity():
+    return _state().identity.load_session(request.cookies.get(ID_COOKIE))
+
+
+@bp.route("/auth/id/otp/request", methods=["POST"])
+def id_otp_request():
+    body = read_json_object(request, {"idNumber": 32, "consent": 8})
+    out = _state().identity.request_login_otp(body["idNumber"], body["consent"].strip().lower(), _client_ip())
+    return _json({"ok": True, "message": GENERIC_ID_MESSAGE, **out}, 202)
+
+
+@bp.route("/auth/id/otp/verify", methods=["POST"])
+def id_otp_verify():
+    body = read_json_object(request, {"idNumber": 32, "otp": FIELD_LIMITS["otp"]})
+    state = _state()
+    citizen, kind = state.identity.verify_login_otp(body["idNumber"], body["otp"], _client_ip())
+    token, identity = state.identity.issue_session(citizen, kind, _client_ip(),
+                                                   request.headers.get("User-Agent", ""))
+    resp = _json({"ok": True, "identity": _identity_json(identity)}, 200)
+    _set_id_cookie(resp, token)
+    return resp
+
+
+@bp.route("/auth/id/link", methods=["POST"])
+def id_link():
+    body = read_json_object(request, {"pnr": FIELD_LIMITS["pnr"]})
+    state = _state()
+    identity = current_identity()
+    if identity is None:
+        raise AuthError(401, "identity_required", "Please verify your Aadhaar number or VID first.")
+    booking, seq = state.identity.link_pnr(identity, body["pnr"])
+    token, passenger = state.sessions.issue(booking, _client_ip(), request.headers.get("User-Agent", ""),
+                                            identity=identity, passenger_seq=seq)
+    payload = _passenger_json(passenger, booking)
+    payload["redirect"] = _safe_next(request.args.get("next"))
+    resp = _json(payload, 200)
+    state.sessions.set_cookie(resp, token)
+    return resp
+
+
+@bp.route("/auth/id/me", methods=["GET"])
+def id_me():
+    identity = current_identity()
+    if identity is None:
+        raise AuthError(401, "identity_required", "No verified Aadhaar / VID in this browser.")
+    return _json({"ok": True, "identity": _identity_json(identity)})
 
 
 @bp.route("/auth/me", methods=["GET"])
@@ -200,13 +279,18 @@ def me():
 @bp.route("/passenger/login", methods=["GET"])
 def login_page():
     state = _state()
-    try:
-        state.sessions.load(request.cookies.get(COOKIE_NAME))
-        return redirect(_safe_next(request.args.get("next")))
-    except SessionError:
-        pass
+    add_trip = request.args.get("step") == "link"
+    if not add_trip:
+        try:
+            state.sessions.load(request.cookies.get(COOKIE_NAME))
+            return redirect(_safe_next(request.args.get("next")))
+        except SessionError:
+            pass
+    identity = current_identity()
     return render_template(
         "passenger_login.html",
+        identity=_identity_json(identity) if identity else None,
+        mode=request.args.get("mode", "aadhaar"),
         reason=request.args.get("reason", ""),
         next_url=_safe_next(request.args.get("next")),
         otp_ttl_seconds=state.config.otp_ttl_seconds,

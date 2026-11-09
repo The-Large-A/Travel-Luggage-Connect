@@ -36,7 +36,7 @@ def test_end_to_end_happy_path(client, flow, sms):
     data = resp.get_json()
     assert otp not in resp.get_data(as_text=True)          # the raw OTP is never returned
     assert data["passenger"] == {"pnr": "T26100101", "passengerName": "Arun Kumar",
-                                 "maskedPhone": "+91 ******3210"}
+                                 "maskedPhone": "+91 ******3210", "authMethod": "pnr", "maskedId": None}
     assert data["redirect"] == "/passenger"
     assert data["session"]["expiresInSeconds"] == 1800 and data["session"]["expiresAt"].endswith("Z")
 

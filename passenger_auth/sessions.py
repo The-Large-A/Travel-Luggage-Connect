@@ -37,6 +37,12 @@ class Passenger:
     passenger_name: str
     session_id: str
     expires_at: datetime
+    # Phase 2: how the passenger proved who they are. "pnr" = PNR + phone OTP;
+    # "aadhaar" = mock Aadhaar/VID OTP, then a PNR bound to the same ID token.
+    auth_method: str = "pnr"
+    id_last4: str = ""
+    id_token: str = ""
+    passenger_seqs: tuple = ()
 
 
 def _sid_hash(sid: str) -> str:
@@ -50,8 +56,12 @@ class SessionManager:
         self.clock = clock
         self.serializer = URLSafeSerializer(config.signing_secret, salt="tnstc-passenger-session")
 
-    def issue(self, booking, ip: str, user_agent: str):
-        """Create a session for a verified booking. Returns (cookie_token, Passenger)."""
+    def issue(self, booking, ip: str, user_agent: str, identity=None, passenger_seq=None):
+        """
+        Create a session for a verified booking. Returns (cookie_token, Passenger).
+        `identity` (an IdentitySession) marks an Aadhaar login; `passenger_seq`
+        pins the session to that one passenger on a group booking.
+        """
         now = self.clock()
         expires = now + timedelta(seconds=self.config.session_ttl_seconds)
         sid = secrets.token_urlsafe(32)
@@ -66,11 +76,20 @@ class SessionManager:
             "ip":            ip,
             "userAgent":     (user_agent or "")[:200],
             "purgeAt":       to_db(now + timedelta(seconds=self.config.record_retention_seconds)),
+            "authMethod":    "aadhaar" if identity else "pnr",
+            "idLast4":       identity.last4 if identity else "",
+            "idToken":       identity.aadhaar_token if identity else "",
+            "passengerSeqs": [passenger_seq] if passenger_seq else [],
         })
         token = self.serializer.dumps({"sid": sid, "pnr": booking.pnr, "ph": booking.phone,
                                        "exp": int(expires.timestamp())})
-        return token, Passenger(booking.pnr, booking.phone, booking.passenger_name,
-                                _sid_hash(sid), from_db(to_db(expires)))
+        return token, self._passenger(self.collection.find_one({"sidHash": _sid_hash(sid)}))
+
+    @staticmethod
+    def _passenger(doc) -> Passenger:
+        return Passenger(doc["pnr"], doc["phone"], doc.get("passengerName", ""), doc["sidHash"],
+                         from_db(doc["expiresAt"]), doc.get("authMethod", "pnr"), doc.get("idLast4", ""),
+                         doc.get("idToken", ""), tuple(doc.get("passengerSeqs") or ()))
 
     def _decode(self, token):
         if not token:
@@ -99,8 +118,7 @@ class SessionManager:
             raise SessionError("revoked")
         if from_db(doc["expiresAt"]) <= now:
             raise SessionError("expired")
-        return Passenger(doc["pnr"], doc["phone"], doc.get("passengerName", ""),
-                         doc["sidHash"], from_db(doc["expiresAt"]))
+        return self._passenger(doc)
 
     def revoke(self, session_id: str) -> None:
         self.collection.update_one({"sidHash": session_id, "revokedAt": None},
