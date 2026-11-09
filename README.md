@@ -375,9 +375,39 @@ Design decisions: [`docs/DECISIONS.md`](docs/DECISIONS.md) (F3-01 … F3-14). Ru
 
 ---
 
+## 🧭 Phase 2 (Sem 7 final evaluation)
+
+Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" document.
+
+| Feature | Where | What it does |
+|---|---|---|
+| **A. Mock Aadhaar + PNR** | `passenger_auth/identity*.py`, `templates/passenger_login.html` | Log in with a (mock) Aadhaar number or VID + OTP to the linked phone, then link a PNR whose booking carries the **same ID token** and name. Only an HMAC token and the last 4 digits are stored; data is purged 7 days after the case closes. PNR + mobile stays as the fallback (Aadhaar can never be mandatory). |
+| **B. Smart report form** | `index.html`, `static/js/report-form.js`, `photo-input.js`, `vocabulary.py` | Journey filled from the ticket (route, bus, date, boarding stop, seat taken server-side; alighting editable), category, where the item was kept, a match-readiness meter with add-detail chips (English/Tamil/Tanglish), photo dropzone with compression, Tamil voice shown next to its English translation. |
+| **C. Camera scan for depots** | `item_intake/`, `templates/depot_intake.html`, `static/js/intake.js` | "Add new lost item": the webcam or phone camera opens; OpenCV keeps only sharp, well-lit, *new* views (Laplacian variance, exposure, perceptual hash), finds the item (GrabCut), names colours (k-means in Lab + CIEDE2000) and spots text for a close-up. CLIP zero-shot, OCR and offline Florence-2 write the record; it saves automatically. |
+| **D. Ownership questions v2** | `claims/attributes.py`, `item_intake/questions.py` | Only high-confidence facts become questions; multiple choice uses plausible neighbours (closest colours, same-category brands), never opposites; at most two choice questions per round plus free text; new "text on the tag" question. |
+| **E. Luggage path, contacts, slip** | `map.js`, `/api/transport/routes/<id>/downstream`, `loss_slip.html` | Map: travelled part green, the bus's onward journey amber with downstream depot pins and public phone/WhatsApp; 72-hour "where is it now" card; printable loss slip with a QR to a public verify page. `/api/status` no longer exposes names or descriptions. |
+| **F. Pickup re-check** | `claims/service.py`, `staff_claims.html` | Aadhaar claimants give the last 4 digits + an OTP sent to the Aadhaar-linked phone; the custody log keeps only the ID type and last 4. |
+
+**Demo identities** (fictitious, Verhoeff-valid; full list in `passenger_auth/identity.py`):
+
+| Passenger | Mock Aadhaar | PNR | Shows |
+|---|---|---|---|
+| Arun Kumar | 2345 6789 0124 | T26100101 | Aadhaar login → ticket autofill |
+| Priya Raman | 3456 7890 1238 | T26100102 | booked with a driving licence → "use PNR + mobile" |
+| Meena Senthil | 7890 1234 5674 | T26100105 | group booking → bound to her own seat |
+| Arun Kumar (VID) | 9123 4567 8901 2346 | T26100101 | same person via Virtual ID |
+
+Run `python seed_bookings.py` (with `SIGNING_SECRET` set) after `seed_transport.py` to link the
+sample tickets to real trips. Phone cameras need HTTPS: `HTTPS_ADHOC=1 HOST=0.0.0.0 python app.py`.
+The description writer runs offline on the CPU (Florence-2: about 2 minutes to load the first
+time, about a minute per item); set `INTAKE_VISION_PROVIDER=basic` for instant descriptions.
+
+---
+
 ## 🏆 Impact & Roadmap
 - **Social Impact**: Reduces passenger anxiety and increases trust in public transport.
 - **Future Scope**:
-    - Aadhaar-based identity verification for item collection (today staff check a photo ID at the counter).
-    - Computer Vision for automatic item categorization from photos.
-    - Multi-language support (Tamil & English).
+    - "General ticket" path for passengers without a PNR (conductor ETM tickets: ticket number, route, time).
+    - Optional cloud description writer (Claude Haiku) behind the existing provider switch.
+    - Offline Secure QR verification of e-Aadhaar at pickup (UIDAI signature check).
+    - Live GPS bus tracking and inter-depot transfers.

@@ -64,9 +64,12 @@ def build_answers(facts: dict, min_conf: float) -> tuple:
 
     brand = facts.get("brand")
     if brand:
-        pool = [b for b in (BRANDS.get(category) or ALL_BRANDS)] or list(ALL_BRANDS)
+        # Distractors come from the brand's own market (a bag brand gets other bag
+        # brands), so "Wildcraft / Skybags / VIP" — never "Wildcraft / Acer / Redmi".
+        home = next((c for c, names in BRANDS.items() if brand["name"] in names and len(names) >= 3), None)
+        pool = BRANDS.get(home or category) or ()
         if len(pool) < 3:
-            pool = list(ALL_BRANDS)
+            pool = BRANDS["bag"]
         consider("brand", brand["name"], brand["confidence"], _pick(pool, {brand["name"]}), "OCR")
 
     tag = facts.get("tagText")

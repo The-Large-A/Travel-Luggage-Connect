@@ -15,6 +15,7 @@ from item_intake import vision
 from item_intake.analysis import looks_like_id, redact_ids
 from item_intake.captioner import BasicCaptioner
 from item_intake.questions import build_answers, public_description
+from vocabulary import BRANDS
 
 RNG = np.random.default_rng(3)
 
@@ -99,7 +100,14 @@ def test_only_confident_facts_become_questions():
     assert "Wildcraft" not in repr(report) and "ARUN" not in repr(report)  # report never holds values
     assert choices["zipper_tag_colour"][0] == "yellow" and len(choices["zipper_tag_colour"]) == 3
     assert "blue" not in choices["zipper_tag_colour"]                     # opposite of yellow is not offered
+    assert set(choices["brand"]) <= set(BRANDS["bag"])                    # bag brands only, never Acer/Redmi
     assert public_description(FACTS) == "Black bag"
+
+
+def test_brand_distractors_follow_the_brand_not_a_misread_category():
+    facts = {**FACTS, "category": "documents", "noun": "document folder"}
+    _raw, choices, _ = build_answers(facts, 0.6)
+    assert set(choices["brand"]) <= set(BRANDS["bag"])
 
 
 def test_choice_questions_render_options_and_still_hash_the_answer():

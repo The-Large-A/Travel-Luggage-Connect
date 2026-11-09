@@ -12,3 +12,5 @@ requests
 twilio
 groq
 segno
+opencv-python-headless>=4.10
+cryptography

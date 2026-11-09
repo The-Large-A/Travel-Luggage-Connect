@@ -37,6 +37,7 @@ from claims import encode_private_attributes, new_tag_id
 from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
                         vocabulary_payload)
 from item_intake import init_item_intake
+from report_schema import apply_phase2_validators
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ def ensure_indexes():
 
 
 ensure_indexes()
+apply_phase2_validators(db)
 
 # Feature 1: OTP-based passenger authentication (/auth/* API, /passenger pages,
 # and the require_passenger guard used by passenger-facing features).
@@ -1337,7 +1339,9 @@ def api_transport_seatmap(trip_id):
     return jsonify(seatmap)
 
 
-GROQ_MODEL = (os.environ.get("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
+# Groq retired llama3-8b-8192 (Aug 2025) and llama-3.1-8b-instant (Aug 2026);
+# openai/gpt-oss-20b is its recommended replacement. Override with GROQ_MODEL.
+GROQ_MODEL = (os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b").strip()
 TRANSLATE_LANGS = {"ta": "Tamil", "hi": "Hindi"}
 
 
@@ -1347,7 +1351,7 @@ def api_translate():
     Translate a spoken/typed description into English using Groq. The browser
     keeps the original text and shows both; on any failure it simply keeps the
     original, so a translation outage never loses what the passenger said.
-    (The old model id llama3-8b-8192 was retired; set GROQ_MODEL to override.)
+    The model is set by GROQ_MODEL (see the note on GROQ_MODEL above).
     """
     data = request.get_json(silent=True) or {}
     text = data.get('text')
@@ -1374,7 +1378,9 @@ def api_translate():
             ],
             model=GROQ_MODEL,
             temperature=0,
-            max_tokens=400,
+            # gpt-oss models reason before answering; keep that short and leave room for it.
+            max_tokens=1200,
+            **({"reasoning_effort": "low"} if GROQ_MODEL.startswith("openai/gpt-oss") else {}),
         )
         translated_text = chat_completion.choices[0].message.content.strip()
         return jsonify({'translated': translated_text, 'model': GROQ_MODEL})

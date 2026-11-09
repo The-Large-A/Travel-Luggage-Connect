@@ -59,6 +59,12 @@
             <p class="font-heading font-bold text-slate-800 uppercase">Track a claim</p>
             <p class="text-xs text-slate-500 mt-1">Check progress with your Tracking ID.</p>
         </a>
+        {% if passenger.auth_method == 'aadhaar' %}
+        <a href="{{ url_for('passenger_auth.login_page', step='link', next='/') }}" class="sm:col-span-2 card-professional p-6 hover:border-tn-blue transition-colors">
+            <p class="font-heading font-bold text-slate-800 uppercase">Lost something on another trip?</p>
+            <p class="text-xs text-slate-500 mt-1">Your Aadhaar is verified (XXXX XXXX {{ passenger.id_last4 }}). Just enter the other ticket's PNR.</p>
+        </a>
+        {% endif %}
     </div>
 
     <div class="flex justify-center">
