@@ -133,7 +133,19 @@ class IdentityService:
         })
         self.sms.send_otp(phone, otp, cfg.otp_ttl_seconds)
 
-    def _verify(self, subject, phone, purpose, otp):
+    def _verify(self, subject, phone, purpose, otp, reveal=True):
+        """
+        reveal=False (passenger login): every failure is the same generic 401, so
+        the answers cannot tell a registered Aadhaar number from an unregistered one.
+        """
+        if not reveal:
+            try:
+                return self._verify(subject, phone, purpose, otp, reveal=True)
+            except AuthError as e:
+                if e.status in (401, 423):
+                    raise AuthError(401, "otp_invalid", INVALID_OTP_MESSAGE + " After several wrong "
+                                    "attempts verification pauses for a while.")
+                raise
         cfg = self.config
         if not is_valid_otp_format(otp):
             raise AuthError(400, "invalid_request", "The OTP must be exactly 6 digits.",
@@ -191,16 +203,13 @@ class IdentityService:
             raise AuthError(429, "id_request_limit", "Too many OTP requests for this number. Please try later.",
                             retry_after=retry)
         citizen = find_citizen(self.db, self.token_key, kind, digits)
-        if citizen:
-            lock = self._active_lock(citizen.aadhaar_token, LOGIN)
-            if lock:
-                raise self._locked_error(lock)
+        locked = bool(citizen and self._active_lock(citizen.aadhaar_token, LOGIN))
         gate = self.limiter.acquire_cooldown("id-otp-resend", subject_probe, cfg.otp_resend_seconds)
         if not gate.allowed:
             raise AuthError(429, "resend_cooldown", "Please wait before requesting another OTP.",
                             retry_after=gate.retry_after)
         self.limiter.record_event("id-otp-request", subject_probe, 3600)
-        if citizen:
+        if citizen and not locked:            # locked: same generic answer, no SMS
             self._issue(citizen.aadhaar_token, citizen.linked_phone, LOGIN, ip)
             logger.info("Identity OTP issued for %s to %s.", mask_id(citizen.last4), mask_phone(citizen.linked_phone))
         else:
@@ -217,8 +226,9 @@ class IdentityService:
             if not is_valid_otp_format(otp):
                 raise AuthError(400, "invalid_request", "The OTP must be exactly 6 digits.",
                                 fields={"otp": "invalid_format"})
-            raise AuthError(401, "otp_invalid", INVALID_OTP_MESSAGE)
-        self._verify(citizen.aadhaar_token, citizen.linked_phone, LOGIN, otp)
+            raise AuthError(401, "otp_invalid", INVALID_OTP_MESSAGE + " After several wrong "
+                            "attempts verification pauses for a while.")
+        self._verify(citizen.aadhaar_token, citizen.linked_phone, LOGIN, otp, reveal=False)
         return citizen, kind
 
     # ── identity sessions ────────────────────────────────────────────────────

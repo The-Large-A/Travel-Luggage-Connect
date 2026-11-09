@@ -584,7 +584,7 @@ function seatButton(n) {
     b.className =
         'seat-btn w-8 h-8 text-[11px] font-bold rounded border border-slate-300 bg-white ' +
         'text-slate-600 hover:border-tn-blue hover:bg-blue-50 transition-colors disabled:hover:bg-white disabled:cursor-not-allowed';
-    b.disabled = !!ticketJourney;
+    b.disabled = !!(ticketJourney && ticketJourney.seatNo);
     b.addEventListener('click', () => selectSeat(n));
     return b;
 }
@@ -599,7 +599,7 @@ async function applyJourney(p) {
     await selectRoute(j.route);
     tripSelect.value = j.tripId;
     await loadSeatmap(j.tripId);
-    selectSeat(j.seatNo);
+    if (j.seatNo) selectSeat(j.seatNo);       // no seat on the ticket: the passenger picks it
     dateInput.value = j.date;
     boardingSelect.value = j.boardingStopId;
     alightingSelect.value = j.alightingStopId;

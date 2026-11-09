@@ -58,13 +58,24 @@ def test_last4_plus_otp_completes_and_logs_only_last4(aadhaar_claim):
     sent = staff.post("/pickup/identity/otp", json={"token": token})
     assert sent.status_code == 200 and sent.get_json()["maskedPhone"].endswith("3210")
     otp = f3.sms.last_otp("+919876543210")
-    assert complete(f3, token, tag, idLast4=ARUN_NUMBER[-4:], idOtp="000000" if otp != "000000" else "111111") \
-        .status_code == 401                                                     # wrong OTP
+    bad = complete(f3, token, tag, idLast4=ARUN_NUMBER[-4:], idOtp="000000" if otp != "000000" else "111111")
+    assert bad.status_code == 409 and bad.get_json()["error"]["code"] == "id_mismatch"   # wrong OTP
     resp = complete(f3, token, tag, idLast4=ARUN_NUMBER[-4:], idOtp=otp)
     assert resp.status_code == 200, resp.get_json()
     entry = f3.db.custody_log.find_one({"claimId": claim_id, "event": "handover"})
     assert entry["idType"] == "aadhaar" and entry["idLast4"] == ARUN_NUMBER[-4:] and entry["otpVerified"]
     assert ARUN_NUMBER not in repr(entry)
+
+
+def test_right_otp_wrong_digits_looks_like_any_failure(aadhaar_claim):
+    f3, _claim, token, tag = aadhaar_claim
+    f3.staff_client().post("/pickup/identity/otp", json={"token": token})
+    otp = f3.sms.last_otp("+919876543210")
+    wrong = f"{(int(ARUN_NUMBER[-4:]) + 1) % 10000:04d}"
+    resp = complete(f3, token, tag, idLast4=wrong, idOtp=otp)
+    assert resp.status_code == 409 and resp.get_json()["error"]["code"] == "id_mismatch"
+    # The OTP is spent: the digits cannot be tried again with it.
+    assert complete(f3, token, tag, idLast4=ARUN_NUMBER[-4:], idOtp=otp).status_code == 409
 
 
 def test_otp_is_required(aadhaar_claim):

@@ -20,7 +20,7 @@ import threading
 import uuid
 from datetime import timedelta
 
-from passenger_auth.timeutil import iso_utc, to_db
+from passenger_auth.timeutil import from_db, iso_utc, to_db
 
 from . import vision
 from .analysis import analyse
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 DRAFTS = "item_drafts"
 STEPS = ("outside", "inside")
 CLOSEUP_KINDS = ("tag", "detail")
+STALE_JOB_MINUTES = 15            # an "analysing" draft untouched this long died with its process
 
 
 class IntakeError(Exception):
@@ -85,8 +86,14 @@ class IntakeService:
             raise IntakeError(404, "not_found", "This scan was not found (it may have expired).")
         return doc
 
+    def _stale(self, draft) -> bool:
+        return draft["status"] == "analysing" and from_db(draft["updatedAt"]) < \
+            self.clock() - timedelta(minutes=STALE_JOB_MINUTES)
+
     def _require_capturing(self, draft):
-        if draft["status"] not in ("capturing", "failed"):
+        if draft["status"] == "done":
+            raise IntakeError(409, "already_saved", "This item has already been saved.")
+        if draft["status"] not in ("capturing", "failed") and not self._stale(draft):
             raise IntakeError(409, "not_capturing", "This scan is already being saved.")
 
     # ── frames ───────────────────────────────────────────────────────────────
@@ -159,8 +166,11 @@ class IntakeService:
                    for k in ("route_id", "trip_id", "date", "found_seat_area")}
         if not journey["route_id"] or not journey["date"]:
             raise IntakeError(400, "journey_required", "Choose the route and the date the item was found.")
+        retryable = [{"status": {"$in": ["capturing", "failed"]}},
+                     {"status": "analysing",
+                      "updatedAt": {"$lt": to_db(self.clock() - timedelta(minutes=STALE_JOB_MINUTES))}}]
         claimed = self.drafts.find_one_and_update(
-            {"_id": draft["_id"], "status": {"$in": ["capturing", "failed"]}},
+            {"_id": draft["_id"], "$or": retryable},
             {"$set": {"status": "analysing", "journey": journey, "error": None,
                       "progress": {"pct": 5, "stage": "Starting"}, "updatedAt": to_db(self.clock())}})
         if claimed is None:
@@ -179,6 +189,12 @@ class IntakeService:
     def _job(self, draft_id, depot, journey):
         draft = self.drafts.find_one({"draftId": draft_id})
         try:
+            # A retry after a failure that happened AFTER the item was stored (e.g.
+            # during matching) must finish that item, never create a second one.
+            existing = self.db["found_reports"].find_one({"draftId": draft_id})
+            if existing:
+                self._mark_done(draft_id, existing, None, (draft.get("facts") or {}), {})
+                return
             frames = {step: [self._abs(f["path"]) for f in draft["frames"][step]] for step in STEPS}
             for kind in CLOSEUP_KINDS:
                 frames[kind] = [self._abs(c["path"]) for c in draft["closeups"] if c["kind"] == kind]
@@ -201,14 +217,7 @@ class IntakeService:
                            "captionProvider": facts.get("captionProvider"),
                            "questions": report,          # confidence per attribute — never the answer
                        }})
-            self.drafts.update_one({"draftId": draft_id}, {"$set": {
-                "status": "done", "progress": {"pct": 100, "stage": "Saved"},
-                "facts": {k: facts.get(k) for k in ("category", "categoryConfidence", "colours", "material",
-                                                    "features", "captionProvider", "maskedIds")},
-                "result": {"foundId": found["found_id"], "qrTagId": found.get("qrTagId"), "matches": n,
-                           "publicDescription": found.get("public_description"),
-                           "questions": sorted(k for k, v in report.items() if v["asQuestion"])},
-                "updatedAt": to_db(self.clock())}})
+            self._mark_done(draft_id, found, n, facts, report)
             logger.info("Camera scan %s saved as item %s (%d match(es)).", draft_id, found["found_id"], n)
         except Exception as e:                       # includes FoundReportError (bad journey)
             message = str(e) if e.__class__.__name__ == "FoundReportError" else \
@@ -218,6 +227,19 @@ class IntakeService:
             self.drafts.update_one({"draftId": draft_id}, {"$set": {
                 "status": "failed", "error": message, "progress": {"pct": 0, "stage": "Failed"},
                 "updatedAt": to_db(self.clock())}})
+
+    def _mark_done(self, draft_id, found, matches, facts, report):
+        if matches is None:
+            matches = self.db["matches"].count_documents({"itemId": found["found_id"]})
+        asked = sorted(k for k, v in report.items() if v["asQuestion"]) if report else \
+            sorted(k for k, v in ((found.get("attributes") or {}).get("questions") or {}).items() if v.get("asQuestion"))
+        self.drafts.update_one({"draftId": draft_id}, {"$set": {
+            "status": "done", "progress": {"pct": 100, "stage": "Saved"}, "error": None,
+            "facts": {k: facts.get(k) for k in ("category", "categoryConfidence", "colours", "material",
+                                                "features", "captionProvider", "maskedIds")},
+            "result": {"foundId": found["found_id"], "qrTagId": found.get("qrTagId"), "matches": matches,
+                       "publicDescription": found.get("public_description"), "questions": asked},
+            "updatedAt": to_db(self.clock())}})
 
     # ── views ────────────────────────────────────────────────────────────────
     def view(self, draft) -> dict:
@@ -229,17 +251,22 @@ class IntakeService:
                 "updatedAt": iso_utc(draft["updatedAt"])}
 
     def discard(self, draft):
-        if draft["status"] == "analysing":
+        if draft["status"] == "analysing" and not self._stale(draft):
             raise IntakeError(409, "busy", "This scan is being saved and cannot be discarded now.")
-        if draft["status"] != "done":
+        saved = draft["status"] == "done" or self.db["found_reports"].find_one({"draftId": draft["draftId"]})
+        if not saved:                         # a saved item still points at these photos
             shutil.rmtree(self._abs(self._rel_dir(draft["draftId"])), ignore_errors=True)
         self.drafts.delete_one({"_id": draft["_id"]})
 
 
 def ensure_intake_indexes(db):
-    for keys, opts in (([("draftId", 1)], {"unique": True}), ([("purgeAt", 1)], {"expireAfterSeconds": 0}),
-                       ([("depotPhone", 1), ("status", 1)], {})):
+    specs = ((DRAFTS, [("draftId", 1)], {"unique": True}), (DRAFTS, [("purgeAt", 1)], {"expireAfterSeconds": 0}),
+             (DRAFTS, [("depotPhone", 1), ("status", 1)], {}),
+             # one found item per scan, even if a save is retried
+             ("found_reports", [("draftId", 1)], {"unique": True,
+                                                  "partialFilterExpression": {"draftId": {"$type": "string"}}}))
+    for name, keys, opts in specs:
         try:
-            db[DRAFTS].create_index(keys, **opts)
+            db[name].create_index(keys, **opts)
         except Exception as e:
-            logger.warning("Index creation skipped for %s %s: %s", DRAFTS, keys, e)
+            logger.warning("Index creation skipped for %s %s: %s", name, keys, e)

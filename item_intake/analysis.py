@@ -134,18 +134,24 @@ def analyse(frames: dict, classifier, ocr, captioner, progress=lambda pct, stage
             break
     facts["detailColour"] = detail_colour
 
-    # 4. Text: OCR on close-ups (and the first outside view); mask ID numbers.
+    # 4. Text: every stored image that OpenCV sees text on is read (close-ups
+    #    always), and any ID number found is masked in the file before saving —
+    #    an Aadhaar card inside a wallet must never be stored readable.
     progress(65, "Reading printed text")
     texts, tag_texts = [], []
-    for path in (tags + details + outside[:1]):
-        text = (ocr.extract_text(path) if ocr is not None else "") or ""
+    for path in (tags + details + outside + inside):
         img = cv2.imread(path)
-        if img is not None and looks_like_id(text):
-            boxes = vision.text_regions(img)
+        if img is None:
+            continue
+        boxes = vision.text_regions(img)
+        if not boxes and path not in tags and path not in details:
+            continue
+        text = (ocr.extract_text(path) if ocr is not None else "") or ""
+        if looks_like_id(text):
             cv2.imwrite(path, vision.blur_regions(img, boxes) if boxes else cv2.GaussianBlur(img, (51, 51), 0))
             facts["maskedIds"] += 1
         text = redact_ids(text).strip()
-        if text:
+        if text and (path in tags or path in details or path == (outside[:1] or [None])[0]):
             texts.append(text)
             if path in tags:
                 tag_texts.append(text)

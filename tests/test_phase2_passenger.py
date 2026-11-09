@@ -81,6 +81,30 @@ def test_ticket_fields_cannot_be_tampered_with(p2):
     assert set(lost["autofilled"]) == {"route", "trip", "date", "boarding", "seat"}
 
 
+def test_ticket_without_a_seat_lets_the_passenger_pick_one(p2):
+    app_module, db, sms = p2
+    db.bookings.update_one({"pnr": ARUN["pnr"]}, {"$set": {"seatNo": None}})
+    client = _login(app_module.app.test_client(), sms, ARUN)
+    report(client, seat_no="21")
+    lost = db.lost_reports.find_one({})
+    assert lost["seat_no"] == 21 and "seat" not in lost["autofilled"]
+
+
+def test_group_booking_aadhaar_session_sees_only_its_own_reports(p2):
+    app_module, db, sms = p2
+    for seq, name in ((1, "Senthil Kumar"), (2, "Meena Senthil")):
+        db.bookings.update_one({"pnr": "T26100105", "passengerSeq": seq}, {"$set": {
+            "routeId": "R100", "tripId": "T1", "boardingStopId": "S1", "alightingStopId": "S2",
+            "seatNo": 10 + seq, "travelDate": _today()}})
+    senthil = aadhaar_login(app_module.app.test_client(), sms, "Senthil Kumar", "T26100105")
+    report(senthil, description="Senthil's brown leather wallet")
+    tracking = db.lost_reports.find_one({"passengerSeq": 1})["tracking_id"]
+    meena = aadhaar_login(app_module.app.test_client(), sms, "Meena Senthil", "T26100105")
+    assert meena.get(f"/passenger/reports/{tracking}/slip").status_code == 404
+    assert meena.get("/reports").get_json()["reports"] == []
+    assert len(senthil.get("/reports").get_json()["reports"]) == 1
+
+
 def test_alighting_before_boarding_is_refused_for_a_ticket(p2):
     app_module, db, sms = p2
     db.bookings.update_one({"pnr": ARUN["pnr"]}, {"$set": {"boardingStopId": "S2", "alightingStopId": "S3"}})

@@ -5,11 +5,13 @@ OpenCV gating is tested on synthetic images; the whole flow (draft → frames �
 close-ups → automatic save → found item + questions + matching) runs against
 the REAL app.py with CLIP / OCR replaced by deterministic fakes.
 """
+import os
+
 import cv2
 import numpy as np
 import pytest
 
-from test_match_e2e import _login, _today, e2e, real_app  # noqa: F401  (fixtures)
+from test_match_e2e import _today, e2e, real_app  # noqa: F401  (fixtures)
 from claims.attributes import encode_private_attributes, question_view, select_questions
 from item_intake import vision
 from item_intake.analysis import looks_like_id, redact_ids
@@ -123,6 +125,28 @@ def test_choice_questions_render_options_and_still_hash_the_answer():
         chosen, _reserve = select_questions(item)
         kinds = ["choice" if attrs[q].get("choices") else "text" for q in chosen]
         assert "text" in kinds and kinds.count("choice") <= 2              # never recognition alone
+
+
+def test_a_round_is_never_only_multiple_choice():
+    raw = {"zipper_tag_colour": "yellow", "content_item": "tiffin", "brand": "Wildcraft"}
+    choices = {"zipper_tag_colour": ["yellow", "orange", "gold"], "content_item": ["tiffin", "book", "keys"],
+               "brand": ["Wildcraft", "Skybags", "VIP"]}
+    attrs = encode_private_attributes(raw, "bag", "Black bag", b"k" * 32, 5, choices=choices)
+    assert select_questions({"category": "bag", "private_attributes": attrs}) == ([], None)   # → staff review
+
+
+def test_reserve_question_prefers_free_text():
+    raw = {"zipper_tag_colour": "yellow", "content_item": "tiffin", "brand": "Wildcraft",
+           "tag_text": "ARUN K", "distinguishing_mark": "CSK sticker"}
+    choices = {"zipper_tag_colour": ["yellow", "orange", "gold"], "content_item": ["tiffin", "book", "keys"],
+               "brand": ["Wildcraft", "Skybags", "VIP"]}
+    attrs = encode_private_attributes(raw, "bag", "Black bag", b"k" * 32, 5, choices=choices)
+    for _ in range(20):
+        chosen, reserve = select_questions({"category": "bag", "private_attributes": attrs})
+        texts = [q for q in chosen if "choices" not in attrs[q]]
+        assert texts and sum(1 for q in chosen if "choices" in attrs[q]) <= 2
+        if len(texts) < 2:
+            assert "choices" not in attrs[reserve]
 
 
 def test_invalid_choice_lists_are_dropped():
@@ -272,6 +296,53 @@ def test_bad_journey_fails_softly_and_can_be_retried(intake):
     assert d["status"] == "failed" and "route" in d["error"].lower()
     staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
     assert staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]["status"] == "done"
+
+
+def test_retry_after_a_late_failure_never_duplicates_the_item(intake, monkeypatch):
+    app_module, db, svc, staff = intake
+    draft = capture_item(staff)
+    real = svc.create_found
+
+    def store_then_crash(*args, **kwargs):
+        real(*args, **kwargs)                       # the item is stored ...
+        raise RuntimeError("matching service down")  # ... then something after it fails
+    monkeypatch.setattr(svc, "create_found", store_then_crash)
+    staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
+    assert staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]["status"] == "failed"
+    monkeypatch.setattr(svc, "create_found", real)
+    staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
+    d = staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]
+    assert d["status"] == "done" and db.found_reports.count_documents({"draftId": draft}) == 1
+    assert staff.post(f"/api/intake/drafts/{draft}/finalize",
+                      json={"route_id": "R100", "date": _today()}).status_code == 409   # already saved
+
+
+def test_a_stuck_save_can_be_retried(intake):
+    from datetime import timedelta
+    app_module, db, svc, staff = intake
+    draft = capture_item(staff)
+    old = svc.clock() - timedelta(minutes=20)
+    db.item_drafts.update_one({"draftId": draft}, {"$set": {"status": "analysing", "updatedAt": old}})
+    resp = staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
+    assert resp.status_code == 202
+    assert staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]["status"] == "done"
+
+
+def test_id_numbers_are_masked_on_inside_frames_too(intake, monkeypatch):
+    app_module, db, svc, staff = intake
+
+    class InsideOCR:
+        def extract_text(self, path):
+            # inside frames are saved as i1.jpg, i2.jpg ...; only they "show" an ID card
+            return "aadhaar 2345 6789 0124" if os.path.basename(path).startswith("i") else ""
+    monkeypatch.setattr(svc, "ocr", InsideOCR())
+    draft = new_draft(staff)
+    for a, s in ((0, 0), (60, 60)):
+        send(staff, draft, view(a, shift=s))
+    assert send(staff, draft, view(90, colour=(200, 200, 200), text="2345 6789 0124"), step="inside")["kept"]
+    staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
+    d = staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]
+    assert d["facts"]["maskedIds"] == 1
 
 
 def test_too_few_views_cannot_be_saved(intake):

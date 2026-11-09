@@ -129,15 +129,33 @@ def test_unregistered_number_gets_the_same_generic_answer(client, sms):
     assert bad.status_code == 401 and bad.get_json()["error"]["code"] == "otp_invalid"
 
 
-def test_wrong_otp_locks_after_the_limit(client, sms):
+def test_wrong_otp_locks_after_the_limit_without_revealing_it(client, sms, clock):
     assert request_id_otp(client, ARUN_AADHAAR).status_code == 202
     good = sms.last_otp()
     wrong = f"{(int(good) + 1) % 1_000_000:06d}"
-    codes = [client.post("/auth/id/otp/verify", json={"idNumber": ARUN_AADHAAR, "otp": wrong}).status_code
-             for _ in range(3)]
-    assert codes == [401, 401, 423]
+    replies = [client.post("/auth/id/otp/verify", json={"idNumber": ARUN_AADHAAR, "otp": wrong})
+               for _ in range(3)]
+    assert [r.status_code for r in replies] == [401, 401, 401]
+    assert all("attemptsRemaining" not in r.get_json()["error"] for r in replies)
     late = client.post("/auth/id/otp/verify", json={"idNumber": ARUN_AADHAAR, "otp": good})
-    assert late.status_code == 423
+    assert late.status_code == 401                                   # locked, but it looks like any failure
+    # Asking again while locked: the same generic 202, and no SMS goes out.
+    clock.advance(60)
+    sent = len(sms.sent)
+    assert request_id_otp(client, ARUN_AADHAAR).status_code == 202 and len(sms.sent) == sent
+
+
+def test_registered_and_unregistered_numbers_fail_identically(client, sms):
+    unknown = "2222333344"
+    from passenger_auth.identity import verhoeff_check_digit
+    unknown = unknown + "4"
+    unknown = unknown[:11] + verhoeff_check_digit(unknown[:11])
+    request_id_otp(client, ARUN_AADHAAR)
+    a = client.post("/auth/id/otp/verify", json={"idNumber": ARUN_AADHAAR, "otp": "000000"}).get_json()
+    b = client.post("/auth/id/otp/verify", json={"idNumber": unknown, "otp": "000000"}).get_json()
+    if sms.last_otp() == "000000":                                   # astronomically unlikely
+        return
+    assert a == b
 
 
 def test_link_requires_a_verified_identity(client):

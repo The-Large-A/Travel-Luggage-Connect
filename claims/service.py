@@ -27,6 +27,7 @@ from pymongo.errors import DuplicateKeyError
 from match_notify.service import (AUTO_APPROVED, CLAIM_STARTED, NOTIFIED, RELEASED, RESOLVED,
                                   NotFound as MatchNotFound)
 from match_notify.template import format_found_date, public_item_description
+from passenger_auth.errors import AuthError
 from passenger_auth.otp import derive_key
 from passenger_auth.phone import mask_phone
 from passenger_auth.timeutil import fmt_ist, from_db, iso_utc, seconds_until, to_db
@@ -73,7 +74,7 @@ PICKUP_REASONS = {
     "tag_required": "Scan or enter the item's QR tag to confirm the handover.",
     "id_check_required": "Confirm that you checked the passenger's photo ID.",
     "id_last4_required": "Ask the passenger for the last 4 digits of the Aadhaar / VID they logged in with.",
-    "id_mismatch": "Those digits do not match the identity on this claim. Do not hand over.",
+    "id_mismatch": "The identity check failed (digits or OTP). Do not hand over; ask the passenger to check.",
     "id_otp_required": "Send the OTP to the passenger's Aadhaar-linked mobile and enter it.",
     "report_closed": "The lost report was closed, so this handover cannot be recorded.",
     "match_changed": "The match was changed by another action. Reload and try again.",
@@ -617,11 +618,19 @@ class ClaimsService:
             digits = (id_last4 or "").strip()
             if len(digits) != 4 or not digits.isdigit():
                 raise ClaimError(400, "id_last4_required", PICKUP_REASONS["id_last4_required"])
-            if not hmac.compare_digest(digits, ident["last4"]):
-                raise ClaimError(409, "id_mismatch", PICKUP_REASONS["id_mismatch"])
             if not id_otp:
                 raise ClaimError(400, "id_otp_required", PICKUP_REASONS["id_otp_required"])
-            self.identity.verify_pickup_otp(ident["token"], id_otp)       # raises AuthError on a bad OTP
+            # The OTP (sent to the passenger's own phone, 3 tries) is checked FIRST and
+            # both failures look the same, so the last 4 digits cannot be guessed at the desk.
+            try:
+                self.identity.verify_pickup_otp(ident["token"], id_otp)
+                otp_ok = True
+            except AuthError as e:                      # wrong / expired / locked OTP
+                if e.status == 423:
+                    raise
+                otp_ok = False
+            if not (otp_ok and hmac.compare_digest(digits, ident["last4"])):
+                raise ClaimError(409, "id_mismatch", PICKUP_REASONS["id_mismatch"])
             id_record = {"idType": ident.get("type", "aadhaar"), "idLast4": ident["last4"], "otpVerified": True}
         else:
             if id_checked is not True:

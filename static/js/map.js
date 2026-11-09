@@ -210,6 +210,8 @@ function renderSingleRoute(map, route, color = '#1F6FB2') {
 // Phase 2: luggage path — where a forgotten item can travel
 // ─────────────────────────────────────────────────────────────────────────────
 let _luggagePathLayer = null;
+const _escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /**
  * Overlay the passenger's journey on the selected route: the travelled part in
@@ -241,10 +243,11 @@ function renderLuggagePath(map, data) {
   }
   (data.depots || []).forEach(d => {
     if (d.lat == null || d.lon == null) return;
-    const phone = d.publicPhone ? `<br><a href="tel:${d.publicPhone.replace(/\s/g, '')}">${d.publicPhone}</a>` : '';
+    const phone = d.publicPhone
+      ? `<br><a href="tel:${_escHtml(d.publicPhone.replace(/\s/g, ''))}">${_escHtml(d.publicPhone)}</a>` : '';
     L.marker([d.lat, d.lon], { icon: depotIcon('#D4960A'), title: d.name, zIndexOffset: 500 })
       .addTo(group)
-      .bindPopup(`<b style="color:#B45309">${d.name}</b><br>` +
+      .bindPopup(`<b style="color:#B45309">${_escHtml(d.name)}</b><br>` +
                  `<span style="font-size:11px">Downstream depot: items left on this bus are logged here.</span>${phone}`);
   });
   group.addTo(map);

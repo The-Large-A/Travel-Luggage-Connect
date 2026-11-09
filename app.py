@@ -3,7 +3,7 @@ import re
 import math
 import uuid
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import requests
 from flask import (
@@ -574,8 +574,8 @@ def get_matches_for_depot(depot_phone: str) -> list:
 
     # Sort each group's matches by score descending
     result = list(groups.values())
-    for g in result:
-        g["matches"].sort(key=lambda x: x["score"]["final"], reverse=True)
+    for group in result:
+        group["matches"].sort(key=lambda x: x["score"]["final"], reverse=True)
 
     return result
 
@@ -677,10 +677,11 @@ def submit_lost():
         name = row["passengerName"]
     if journey:
         route_id, trip_id = journey["route"]["route_id"], journey["tripId"]
-        date, boarding_stop_id, seat_no = journey["date"], journey["boardingStopId"], journey["seatNo"]
+        date, boarding_stop_id = journey["date"], journey["boardingStopId"]
+        seat_no = journey["seatNo"] or seat_no            # a ticket may not carry a seat: the passenger picks it
         alighting_stop_id = alighting_stop_id or journey["alightingStopId"]
         alighting_changed = alighting_stop_id != journey["alightingStopId"]
-        autofilled = ["route", "trip", "date", "boarding", "seat"]
+        autofilled = ["route", "trip", "date", "boarding"] + (["seat"] if journey["seatNo"] else [])
 
     if not all([route_id, trip_id, seat_no, boarding_stop_id,
                 alighting_stop_id, date, description, phone, name]):
@@ -1060,6 +1061,8 @@ def _owned_report(tracking_id: str, passenger):
     report = lost_collection.find_one({"tracking_id": (tracking_id or "").strip().upper()})
     if not report or report.get("ownerPnr") != passenger.pnr or report.get("ownerPhone") != passenger.phone:
         return None
+    if passenger.passenger_seqs and report.get("passengerSeq") not in passenger.passenger_seqs:
+        return None                                  # Aadhaar session: only this passenger's own reports
     return report
 
 

@@ -479,15 +479,23 @@ class MatchNotifyService:
     def owned_report(self, tracking_id, passenger):
         if not isinstance(tracking_id, str) or len(tracking_id) > 20:
             raise NotFound()
-        lost = self.lost.find_one({"tracking_id": tracking_id.strip().upper(),
-                                   "ownerPnr": passenger.pnr, "ownerPhone": passenger.phone})
+        query = {"tracking_id": tracking_id.strip().upper(), **self._owner_query(passenger)}
+        lost = self.lost.find_one(query)
         if not lost:
             raise NotFound()
         return lost
 
+    @staticmethod
+    def _owner_query(passenger):
+        """PNR + phone; an Aadhaar session is narrowed to its own passenger on a group booking."""
+        query = {"ownerPnr": passenger.pnr, "ownerPhone": passenger.phone}
+        seqs = list(getattr(passenger, "passenger_seqs", ()) or ())
+        if seqs:
+            query["passengerSeq"] = {"$in": seqs}
+        return query
+
     def reports_for(self, passenger):
-        return list(self.lost.find({"ownerPnr": passenger.pnr, "ownerPhone": passenger.phone})
-                    .sort("created_at", -1))
+        return list(self.lost.find(self._owner_query(passenger)).sort("created_at", -1))
 
     def visible_matches_for_report(self, lost):
         return list(self.matches.find({"reportId": lost["request_id"], "approvedAt": {"$exists": True}})

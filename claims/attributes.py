@@ -122,23 +122,32 @@ def select_questions(item, previous=()):
     # 2 askable → 2 questions, no reserve; 3 → 2 + reserve; 4+ → 3 + reserve.
     count = ROUND_QUESTIONS if len(ordered) > ROUND_QUESTIONS else MIN_QUESTIONS
     ordered = _mix_formats(ordered, count, item.get("private_attributes") or {})
+    if len(ordered) < MIN_QUESTIONS:
+        return [], None
     reserve = ordered[count] if len(ordered) > count else None
     return ordered[:count], reserve
 
 
 def _mix_formats(ordered, count, attrs):
     """
-    Prefer a round of at most two multiple-choice questions plus free text, so a
-    claimant cannot pass on recognition alone. Order is otherwise preserved.
+    Every round must contain at least one free-text question: a round of 3-option
+    multiple choice alone could be passed by guessing (1 in 9 for two questions).
+    Rounds take at most two choice questions, the rest free text, and the reserve
+    (the borderline follow-up) is free text whenever one is left. Returns [] when
+    the item has no free-text question at all — the claim then goes to staff.
     """
     choice = [q for q in ordered if attrs.get(q, {}).get("choices")]
     text = [q for q in ordered if q not in choice]
-    if not choice or not text:
+    if not choice:
         return ordered
+    if not text:
+        return []
     head = choice[:min(2, count - 1)]
     head += text[:count - len(head)]
     head += [q for q in choice if q not in head][:count - len(head)]
-    return head + [q for q in ordered if q not in head]
+    rest_text = [q for q in text if q not in head]
+    rest_choice = [q for q in choice if q not in head]
+    return head + rest_text + rest_choice
 
 
 def question_view(qid: str, attrs=None) -> dict:

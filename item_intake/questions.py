@@ -15,7 +15,7 @@ Rules (Phase 2, Feature D):
 """
 import secrets
 
-from vocabulary import ALL_BRANDS, BRANDS, CATEGORY_LABELS, similar_colours
+from vocabulary import BRANDS, CATEGORY_LABELS, similar_colours
 
 _rng = secrets.SystemRandom()
 COMMON_CONTENTS = ("phone", "wallet", "book", "bottle", "charger", "tiffin", "clothes", "earphones",
