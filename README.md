@@ -157,6 +157,15 @@ python -m pytest tests -q
 ```
 The suite runs on an in-memory MongoDB (mongomock), so it needs no database or ML models.
 
+What the suite covers beyond the unit tests:
+
+| Command | What it checks |
+|---|---|
+| `python tools/match_benchmark.py` | v1 vs v2 matcher on 27 labelled reports / 26 items with hard negatives, replayed in arrival order (real SBERT; `--fake` for the test model) |
+| `tests/test_matching.py` | every evidence rule, calibration, gates, odd input (emoji, injection, 20k chars, non-strings), 400 randomised pairs, order invariance |
+| `tests/test_questions.py` | every category x question for sense, option contrast and flatness, and genuine owners vs four impostor types through the real hashing and scoring |
+| `python tools/fetch_media.py` then `tests/test_media.py` | 52 freely licensed Commons photos and clips (`datasets/media/ATTRIBUTION.md`) through real CLIP and OpenCV: same-object retrieval, description vs photo, zero-shot category and the question gate, colours, the camera-scan frame gate on video, and the matcher; skipped when the media is not downloaded |
+
 ---
 
 ## 🔐 Passenger Login: two security layers (Feature 1)

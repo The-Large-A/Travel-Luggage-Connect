@@ -112,9 +112,11 @@ class IntakeService:
         feedback = self._counts(draft)
         sharp = vision.sharpness(img)
         exp = vision.exposure(img)
-        if exp["mean"] < cfg.min_brightness:
+        # Too dark only when genuinely black (a dark wallet in dim light is still readable).
+        if exp["mean"] < cfg.min_brightness and (exp["dark"] > 0.25 or exp["mean"] < cfg.min_brightness / 2):
             return {**feedback, "kept": False, "hint": "Too dark — move to better light."}
-        if exp["mean"] > cfg.max_brightness or exp["bright"] > 0.25:
+        # Glare on the item, not a white table or sheet behind it, rejects a frame.
+        if exp["mean"] > cfg.max_brightness or exp["glare"] > 0.08:
             return {**feedback, "kept": False, "hint": "Too bright — avoid direct light or glare."}
         if sharp < cfg.min_sharpness:
             return {**feedback, "kept": False, "hint": "Hold still — the picture is blurry."}

@@ -192,9 +192,29 @@ def delta_e2000(lab1, lab2) -> float:
 COLOUR_LAB = {name: rgb_to_lab(rgb) for name, rgb in COLOUR_RGB.items()}
 
 
+# Common shades of each canonical colour, so a camera reading of a navy bag is
+# named "blue" (the word an owner uses) rather than whichever single reference
+# colour happens to be nearest — with one prototype per name, dark navy fell
+# closer to purple. Shades are named the way passengers describe them.
+COLOUR_SHADES = {
+    "blue": [(24, 34, 74), (30, 52, 110), (20, 110, 130), (90, 140, 200),     # navy, dark, teal, sky
+             (62, 76, 98)],                                                     # slate / washed-out navy
+    "red": [(110, 24, 36), (160, 30, 40)],                                       # maroon, crimson
+    "brown": [(190, 160, 115), (150, 110, 70), (80, 55, 40)],                    # khaki/beige, tan, dark brown
+    "green": [(100, 110, 50), (30, 80, 50)],                                     # olive, bottle green
+    "white": [(235, 228, 205)],                                                  # cream / off-white
+    "grey": [(60, 62, 66), (170, 170, 172)],                                     # charcoal, light grey
+    "pink": [(200, 70, 120)],                                                    # magenta
+    "purple": [(80, 40, 110), (170, 140, 200)],                                  # deep purple, lavender
+    "yellow": [(220, 190, 90)],                                                  # mustard
+}
+_SHADE_LAB = [(name, lab) for name, lab in COLOUR_LAB.items()] + \
+    [(name, rgb_to_lab(rgb)) for name, shades in COLOUR_SHADES.items() for rgb in shades]
+
+
 def nearest_colour(lab) -> tuple:
-    """(canonical colour name, ΔE2000 distance) closest to a Lab colour."""
-    return min(((name, delta_e2000(lab, ref)) for name, ref in COLOUR_LAB.items()), key=lambda t: t[1])
+    """(canonical colour name, ΔE2000 distance) closest to a Lab colour, over all named shades."""
+    return min(((name, delta_e2000(lab, ref)) for name, ref in _SHADE_LAB), key=lambda t: t[1])
 
 
 def similar_colours(name: str, n: int = 2) -> list:
@@ -209,12 +229,14 @@ def similar_colours(name: str, n: int = 2) -> list:
 # Pairs people call by either name, or that bus lighting / phone cameras swap:
 # the six palette pairs under ΔE00 25 plus the common naming confusions
 # (charcoal: black/grey, navy: black/blue, tan: brown/orange, maroon: red/brown,
-# cream: yellow/white, teal: blue/green, olive: green/grey, magenta: pink/purple).
+# cream: yellow/white, teal: blue/green, olive: green/grey, magenta: pink/purple,
+# slate: blue/grey).
 COLOUR_ADJACENT = frozenset(frozenset(p) for p in (
     ("black", "grey"), ("black", "blue"), ("black", "brown"), ("grey", "silver"), ("grey", "white"),
     ("silver", "white"), ("red", "pink"), ("red", "orange"), ("red", "brown"), ("orange", "brown"),
     ("orange", "gold"), ("orange", "yellow"), ("yellow", "gold"), ("yellow", "white"), ("gold", "brown"),
     ("pink", "purple"), ("purple", "blue"), ("blue", "green"), ("green", "grey"), ("silver", "gold"),
+    ("blue", "grey"),                     # slate: a navy bag under bus lighting reads as either
 ))
 
 # How common each colour is among lost bags and accessories (sums to 1). A match

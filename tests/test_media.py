@@ -137,6 +137,21 @@ def test_frame_gate_keeps_new_views_and_drops_repeats():
         assert 2 <= len(kept) < len(frames), (item["id"], len(kept), len(frames))
 
 
+def test_frame_gate_accepts_real_product_photos():
+    """Items photographed on a white sheet or in dim light are usable views, not glare or black."""
+    from item_intake import vision
+    from item_intake.config import IntakeConfig
+    cfg = IntakeConfig()
+    rejected = []
+    for item in IMAGES:
+        exp = vision.exposure(read_image(item))
+        too_dark = exp["mean"] < cfg.min_brightness and (exp["dark"] > 0.25 or exp["mean"] < cfg.min_brightness / 2)
+        too_bright = exp["mean"] > cfg.max_brightness or exp["glare"] > 0.08
+        if too_dark or too_bright:
+            rejected.append(item["id"])
+    assert len(rejected) <= len(IMAGES) // 10, rejected
+
+
 # ── colours read by OpenCV ─────────────────────────────────────────────────────
 FAMILY = {"navy blue": {"blue", "black"}, "blue": {"blue", "grey", "silver", "white"},
           "grey/brown": {"grey", "brown", "black", "silver"}, "red": {"red", "pink", "brown", "orange"},

@@ -49,6 +49,16 @@ def test_sharpness_separates_sharp_from_blurred():
     assert vision.sharpness(view(blur=41)) < 10
 
 
+def test_white_background_is_not_glare_but_a_bright_patch_on_the_item_is():
+    on_white = view(colour=(120, 60, 20))
+    on_white[on_white.sum(axis=2) > 600] = 255               # blown-out white table behind the item
+    exp = vision.exposure(on_white)
+    assert exp["bright"] > 0.25 and exp["glare"] < 0.01         # bright, but not glare
+    glare = view()
+    cv2.circle(glare, (320, 240), 110, (255, 255, 255), -1)     # a reflection in the middle of the item
+    assert vision.exposure(glare)["glare"] > 0.08
+
+
 def test_exposure_detects_dark_frames():
     assert vision.exposure(view(light=0.08))["mean"] < 15
     assert 60 < vision.exposure(view())["mean"] < 95

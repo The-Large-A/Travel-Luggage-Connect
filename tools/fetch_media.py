@@ -4,12 +4,15 @@ Download the freely licensed test media listed in datasets/media/manifest.json
 
     python tools/fetch_media.py            # skips files already present
 
-Polite to Commons: one request at a time, a pause between files, and backoff
-on HTTP 429. Each file's licence and author are in datasets/media/ATTRIBUTION.md.
+Polite to Commons: one request at a time, a pause between files, backoff on
+HTTP 429 (honouring Retry-After), and images are fetched as Commons' cached
+960px thumbnails rather than multi-megabyte originals, as Wikimedia asks of
+automated clients (the tests downscale to 640-960px anyway). Each file's licence and author are in datasets/media/ATTRIBUTION.md.
 Videos are reduced to a few still frames by the tests (tests/test_media.py).
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -20,6 +23,17 @@ MEDIA = os.path.join(ROOT, "datasets", "media")
 USER_AGENT = "tnstc-lost-found-test-media/1.0 (college project; fetches a fixed list of Commons files)"
 ALLOWED_HOST = "https://upload.wikimedia.org/"
 MAX_BYTES = 20 * 1024 * 1024
+THUMB_WIDTH = 960                       # one of the widths Commons pre-renders and caches
+
+
+def download_url(item):
+    """Images wider than THUMB_WIDTH: the Commons thumbnail URL; everything else: as listed."""
+    url = item["url"]
+    size = re.search(r"(\d+)x(\d+)", item.get("notes") or "")
+    if item["kind"] != "image" or "/thumb/" in url or not size or int(size.group(1)) <= THUMB_WIDTH:
+        return url
+    head, name = url.rsplit("/", 1)
+    return head.replace("/wikipedia/commons/", "/wikipedia/commons/thumb/") + f"/{name}/{THUMB_WIDTH}px-{name}"
 
 
 def fetch(url, dest):
@@ -36,7 +50,8 @@ def fetch(url, dest):
             return len(data)
         except urllib.error.HTTPError as e:
             if e.code in (429, 503):
-                time.sleep(5 * (attempt + 1))
+                retry = e.headers.get("Retry-After")
+                time.sleep(int(retry) if retry and retry.isdigit() else 20 * (attempt + 1))
                 continue
             raise
     raise RuntimeError("rate limited too many times")
@@ -55,13 +70,13 @@ def main():
             ok += 1
             continue
         try:
-            size = fetch(item["url"], dest)
+            size = fetch(download_url(item), dest)
             ok += 1
             print(f"{item['id']:8} {size / 1e6:5.1f} MB  {item['license']}")
         except Exception as e:                       # keep going; report at the end
             failed += 1
             print(f"{item['id']:8} FAILED: {e}")
-        time.sleep(1.5)
+        time.sleep(3)
     print(f"{ok} present, {failed} failed")
     return 1 if failed else 0
 

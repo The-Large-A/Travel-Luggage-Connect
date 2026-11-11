@@ -48,10 +48,26 @@ def sharpness(img) -> float:
 
 
 def exposure(img) -> dict:
-    """{'mean': L* 0-100, 'dark': share of near-black px, 'bright': share of blown-out px}."""
+    """
+    {'mean': L* 0-100, 'dark': share of near-black px, 'bright': share of blown-out
+    px, 'glare': share of blown-out px in patches that do NOT touch the frame edge}.
+
+    A white table, sheet or wall behind the item is blown out too, but it runs to
+    the edge of the photo; glare is a bright patch ON the item. Only glare should
+    reject a frame (real photos of items on white: 27-72% bright, under 4% glare).
+    """
     lab = cv2.cvtColor(resize_max(img, ANALYSIS_EDGE), cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0].astype(np.float32) * (100.0 / 255.0)
-    return {"mean": float(L.mean()), "dark": float((L < 5).mean()), "bright": float((L > 98).mean())}
+    blown = (L > 98).astype(np.uint8)
+    glare = 0
+    if blown.any():
+        h, w = blown.shape
+        _n, _labels, stats, _c = cv2.connectedComponentsWithStats(blown, connectivity=8)
+        for x, y, bw, bh, area in stats[1:]:
+            if x > 0 and y > 0 and x + bw < w and y + bh < h:
+                glare += int(area)
+    return {"mean": float(L.mean()), "dark": float((L < 5).mean()), "bright": float(blown.mean()),
+            "glare": glare / blown.size}
 
 
 def phash(img) -> int:
