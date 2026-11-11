@@ -54,11 +54,28 @@ Items lost on a bus typically stay on the bus until it reaches a depot or the en
 -   **Example**: If a passenger boards at **Chennai** and gets down at **Villupuram**, the item is logicaly found at depots *after* Villupuram (e.g., **Salem**, **Erode**, or **Coimbatore**).
 -   The system uses the `ROUTES` stop sequence to validate these "downstream" depots.
 
-### 2. Semantic Description Matching
-Traditional keyword search fails (e.g., "blue bag" vs "navy rucksack"). 
--   The system converts descriptions into **384-dimensional embeddings**.
--   **Cosine Similarity** compares the `Lost Description` vs `Depot Notes`.
--   **Threshold**: Set at `0.30` (the unified match score) to balance high sensitivity with relevance.
+### 2. Evidence-based matching (`matching.py`, v2)
+Every pair that passes the luggage-path filter is scored as **record linkage** (the
+Fellegi–Sunter model used by Splink): each signal adds evidence in **bits**,
+log2(P(signal | same item) / P(signal | different item)), and the total becomes a probability.
+
+| Signal | Evidence |
+|---|---|
+| Journey | same trip (weaker when many items were found on it), same bus on a later run, seat proximity, days between journey and find; a **different bus** or an item logged before the journey counts against |
+| Item | category (purse = wallet or handbag counts as compatible), colours (a rare red match weighs more than black; navy vs black is "close", red vs green is a contradiction), contents, material, the item's own brand (a different brand is a contradiction) |
+| Identifiers | serial / IMEI, the passenger's phone number or full name on a tag (OCR) |
+| Similarity | SBERT text, CLIP photo vs photo and **description vs photo**, each turned into a z-score against the other candidates, so a model that rates everything 0.5 adds nothing |
+
+Missing data is neutral, correlated signals are capped, Tamil / Tanglish words are folded first
+(MiniLM is English-only). **Auto-notify** needs P ≥ 0.85 **and** an identifying detail (brand,
+serial, name, two contents, a near-identical photo, or a rare colour on the same item on the same
+journey), no contradiction, a 2-bit lead over the runner-up, and that no other report or item
+claims it as strongly. Staff see only the leading contenders, each with its reasons.
+
+On the labelled benchmark (`python tools/match_benchmark.py`: 27 reports, 26 items, five black
+bags on one trip, duplicates, wrong buses, Tamil reports) the v1 fixed-weight scorer sent **66
+wrong auto-notifications** (same trip counted as proof); v2 sends **none**, surfaces every true
+pair and ranks the true item first every time (R@1 1.0, v1 0.43).
 
 ---
 
@@ -257,13 +274,13 @@ wait for depot staff to approve them first.
    verified PNR + phone, so only that passenger can see it.
 2. The existing matcher runs in **both directions**: a new or updated report against logged
    items, and a newly logged item against older open reports.
-3. Each pair is routed by confidence:
+3. Each pair is routed by the matcher's probability **and its gates** (see *Evidence-based matching*):
 
    | Confidence | Result |
    |---|---|
-   | ≥ 0.85 (`MATCH_AUTO_NOTIFY_MIN`) | notified automatically |
-   | 0.60 – 0.85 (`MATCH_REVIEW_MIN`) | **staff review** at `/staff/review`; nothing is sent before approval |
-   | < 0.60 | rejected, never sent |
+   | ≥ 0.85 (`MATCH_AUTO_NOTIFY_MIN`) and identifying, uncontradicted, clearly ahead | notified automatically |
+   | ≥ 0.60 (`MATCH_REVIEW_MIN`), or ≥ 0.85 but generic / contested | **staff review** at `/staff/review`, with the reasons; nothing is sent before approval |
+   | < 0.60, or not one of a block's leading contenders | rejected, never sent |
 
 4. A background worker sends the message. If WhatsApp fails it retries with exponential backoff,
    then falls back to email. If every channel fails, staff see it in the delivery table and can
@@ -407,7 +424,7 @@ Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" documen
 | **A. Two-layer login: Aadhaar, then PNR** | `passenger_auth/identity*.py`, `vault.py`, `stores.py`, `templates/passenger_login.html` | Always two layers: (mock) Aadhaar or VID + OTP to the linked phone, then the ticket PNR, whose booking must carry the **same ID token** and name. Both mock databases (UIDAI and PNR) are AES-256-GCM encrypted at rest with blind indexes. Reports keep only an HMAC token and the last 4 digits, purged 7 days after the case closes. |
 | **B. Smart report form** | `index.html`, `static/js/report-form.js`, `photo-input.js`, `vocabulary.py` | Journey filled from the ticket (route, bus, date, boarding stop, seat taken server-side; alighting editable), category, where the item was kept, a match-readiness meter with add-detail chips (English/Tamil/Tanglish), photo dropzone with compression, Tamil voice shown next to its English translation. |
 | **C. Camera scan for depots** | `item_intake/`, `templates/depot_intake.html`, `static/js/intake.js` | "Add new lost item": the webcam or phone camera opens; OpenCV keeps only sharp, well-lit, *new* views (Laplacian variance, exposure, perceptual hash), finds the item (GrabCut), names colours (k-means in Lab + CIEDE2000) and spots text for a close-up. CLIP zero-shot, OCR and offline Florence-2 write the record; it saves automatically. |
-| **D. Ownership questions v2** | `claims/attributes.py`, `item_intake/questions.py` | Only high-confidence facts become questions; multiple choice uses plausible neighbours (closest colours, same-category brands), never opposites; at most two choice questions per round plus free text; new "text on the tag" question. |
+| **D. Ownership questions v2** | `claims/attributes.py`, `claims/options.py`, `item_intake/questions.py` | Questions only for the kinds of item they suit, phrased with the item's noun ("the backpack's tag"); category-specific questions only when the camera is sure (≥ 0.8, 0.2 ahead). **Contrasting options**: colours an owner cannot mix up (no charcoal/navy/maroon pairs, ΔE00 ≥ 25), about as common as the true one; contents that fit the item. Hidden facts (inside, lock screen, tag name) weigh 2, visible ones ≤ 1; a round only verifies when a hidden fact was right; words the question suggests ("sticker") never count; a multiple-choice question is never repeated. Simulated (`tests/test_questions.py`): co-passenger impostors verified 3.4% (v1 19.8%), owners of items with a hidden fact 88% (v1 79%), no owner locked out. |
 | **E. Luggage path, contacts, slip** | `map.js`, `/api/transport/routes/<id>/downstream`, `loss_slip.html` | Map: travelled part green, the bus's onward journey amber with downstream depot pins and public phone/WhatsApp; 72-hour "where is it now" card; printable loss slip with a QR to a public verify page. `/api/status` no longer exposes names or descriptions. |
 | **F. Pickup re-check** | `claims/service.py`, `staff_claims.html` | Aadhaar claimants give the last 4 digits + an OTP sent to the Aadhaar-linked phone; the custody log keeps only the ID type and last 4. |
 
