@@ -33,8 +33,8 @@ from passenger_auth.phone import mask_phone
 from passenger_auth.timeutil import fmt_ist, from_db, iso_utc, seconds_until, to_db
 
 from . import statemachine as sm
-from .attributes import ATTRIBUTES, question_view, select_questions
-from .scoring import BORDERLINE, VERIFIED, answer_passes, decide, trust_score
+from .attributes import ATTRIBUTES, HIDDEN, question_view, select_questions
+from .scoring import BORDERLINE, VERIFIED, answer_passes, round_verdict
 from .tokens import (TokenError, code_hash, derive_code, format_code, is_qr_payload, new_nonce,
                      normalize_code, normalize_tag, open_payload, seal_payload)
 from .txn import ConflictAbort, run_atomically
@@ -173,7 +173,8 @@ class ClaimsService:
         return self._start_round(claim, item, previous=())
 
     def _start_round(self, claim, item, previous):
-        chosen, reserve = select_questions(item, previous)
+        asked = {o["question"] for o in claim.get("outcomePerQuestion") or []}
+        chosen, reserve = select_questions(item, previous, asked)
         now = self.clock()
         if not chosen:
             return sm.transition(self.claims, claim, sm.STAFF_REVIEW, now, "system", "insufficient_attributes")
@@ -191,8 +192,9 @@ class ClaimsService:
     def questions(self, claim):
         if claim["status"] != sm.QUESTIONS_PENDING:
             raise ClaimError(409, "no_questions", "There are no questions to answer for this claim right now.")
-        attrs = self._item(claim).get("private_attributes") or {}
-        return [question_view(q, attrs) for q in claim["pendingQuestions"]]
+        item = self._item(claim)
+        attrs = item.get("private_attributes") or {}
+        return [question_view(q, attrs, item) for q in claim["pendingQuestions"]]
 
     def submit_answers(self, claim, answers: dict, passenger):
         if claim["status"] != sm.QUESTIONS_PENDING:
@@ -213,13 +215,14 @@ class ClaimsService:
             # A multiple-choice answer must be one of the options shown, verbatim.
             on_menu = not opts or answers[qid].strip() in opts
             ok = qid in attrs and on_menu and answer_passes(self.answer_key, attrs[qid], answers[qid],
-                                                            self.config, strict)
+                                                            self.config, strict,
+                                                            generic=ATTRIBUTES[qid].get("generic", ()))
             new_outcomes.append({"round": round_no, "question": qid, "outcome": "pass" if ok else "fail"})
         answers.clear()                                  # raw answers are not kept anywhere
         round_outcomes = {o["question"]: o["outcome"] == "pass"
                           for o in claim["outcomePerQuestion"] + new_outcomes if o["round"] == round_no}
-        score = trust_score(round_outcomes, {q: ATTRIBUTES[q]["weight"] for q in round_outcomes})
-        verdict = decide(score, self.config)
+        score, verdict = round_verdict(round_outcomes, {q: ATTRIBUTES[q]["weight"] for q in round_outcomes},
+                                       HIDDEN, self.config)
         now = self.clock()
         common = {"outcomePerQuestion": claim["outcomePerQuestion"] + new_outcomes, "trustScore": score,
                   "answerSeq": claim["answerSeq"] + 1}

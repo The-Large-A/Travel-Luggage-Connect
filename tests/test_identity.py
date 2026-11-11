@@ -1,6 +1,8 @@
 """
 Phase 2, Feature A: mock Aadhaar / VID login, then the PNR as proof of journey.
 """
+import base64
+
 import pytest
 
 from conftest import ARUN, PRIYA, TEST_SECRET
@@ -54,7 +56,7 @@ def test_the_mock_uidai_database_is_encrypted(db):
         flat = repr(doc)
         for aadhaar, vid, name, _yob, _g, phone in MOCK_CITIZENS:
             assert aadhaar not in flat and vid not in flat and phone not in flat and name not in flat
-            assert aadhaar[-4:] not in doc["sealed"]["ct"]                       # last 4 are sealed too
+            assert aadhaar[-4:].encode() not in base64.b64decode(doc["sealed"]["ct"])   # last 4 sealed too
     store = CitizenStore(db, Vault.from_env(TEST_SECRET))
     rec = store.by_token("aadhaarToken", id_token(token_key(TEST_SECRET), AADHAAR, ARUN_AADHAAR))
     assert rec["name"] == "Arun Kumar" and rec["last4"] == ARUN_AADHAAR[-4:]
@@ -63,10 +65,13 @@ def test_the_mock_uidai_database_is_encrypted(db):
 def test_the_mock_pnr_database_is_encrypted(db):
     from passenger_auth.stores import BookingStore
     from passenger_auth.vault import Vault
+
     for doc in db.bookings.find():
         assert set(doc) <= {"_id", "pnrIndex", "passengerSeq", "sealed", "createdAt", "updatedAt"}
-        flat = repr(doc)
-        assert "T261001" not in flat and "Arun" not in flat and "+91" not in flat and "SETC" not in flat
+        clear = repr({k: v for k, v in doc.items() if k != "sealed"})
+        sealed = base64.b64decode(doc["sealed"]["ct"])          # random-looking bytes, not the text
+        for secret in ("T261001", "Arun", "+91", "SETC"):
+            assert secret not in clear and secret.encode() not in sealed
     arun = BookingStore(db, Vault.from_env(TEST_SECRET)).rows(ARUN["pnr"])[0]
     assert arun["idProof"] == {"type": "aadhaar", "last4": ARUN_AADHAAR[-4:],
                                "token": id_token(token_key(TEST_SECRET), AADHAAR, ARUN_AADHAAR)}

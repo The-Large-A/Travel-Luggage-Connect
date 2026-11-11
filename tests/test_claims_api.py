@@ -257,7 +257,7 @@ def test_borderline_adds_question_then_routes_to_staff(f3):
 
 
 def _follow_up_setup(f3, ident, tracking, found_id):
-    """Round brand(1.0) + zipper colour(1.0) + contents(1.5), with the mark question (1.5) in reserve."""
+    """Round brand(0.75) + zipper colour(1.0) + contents(2.0, hidden), mark (1.0) in reserve."""
     item = f3.item(found_id=found_id)
     client = f3.login_passenger(ident, client=f3.app.test_client())
     claim_id = f3.open_claim(client, f3.notified_match(ident, tracking=tracking, item=item))
@@ -265,7 +265,7 @@ def _follow_up_setup(f3, ident, tracking, found_id):
         "questionSet": ["brand", "zipper_tag_colour", "content_item"],
         "pendingQuestions": ["brand", "zipper_tag_colour", "content_item"],
         "reserveQuestion": "distinguishing_mark"}})
-    f3.answer(client, claim_id, wrong={"brand"})                             # 2.5/3.5 = 0.71 → follow-up
+    f3.answer(client, claim_id, wrong={"zipper_tag_colour"})                 # 2.75/3.75 = 0.73 → follow-up
     assert f3.pending(claim_id) == ["distinguishing_mark"]
     return client, claim_id
 
@@ -273,7 +273,7 @@ def _follow_up_setup(f3, ident, tracking, found_id):
 def test_borderline_follow_up_can_verify(f3):
     client, claim_id = _follow_up_setup(f3, ARUN, "TRK-ARUN0001", "item-1")
     resp = f3.answer(client, claim_id, overrides={"distinguishing_mark": "Chennai Super Kings sticker"})
-    assert resp.get_json()["claim"]["status"] == "token_issued"                # 4/5 = 0.8
+    assert resp.get_json()["claim"]["status"] == "token_issued"                # 3.75/4.75 = 0.79
 
 
 def test_borderline_follow_up_is_strict(f3):
@@ -284,7 +284,7 @@ def test_borderline_follow_up_is_strict(f3):
     mark = f3.db.found_reports.find_one({"found_id": "item-2"})["private_attributes"]["distinguishing_mark"]
     assert answer_passes(f3.csvc.answer_key, mark, sloppy, f3.claims_state.config, strict=False)
     resp = f3.answer(client, claim_id, overrides={"distinguishing_mark": sloppy})
-    assert resp.get_json()["claim"]["status"] == "staff_review"               # 2.5/5 = 0.5
+    assert resp.get_json()["claim"]["status"] == "staff_review"               # 2.75/4.75 = 0.58
 
 
 def test_answers_in_tamil_tanglish_english_and_typos(f3):

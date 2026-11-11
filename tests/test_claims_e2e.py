@@ -46,8 +46,14 @@ def test_full_journey_all_three_features(e2e):
         assert item["category"] == "bag" and item["qrTagId"].startswith("TAG-")
         assert set(item["private_attributes"]) == {"zipper_tag_colour", "content_item", "brand",
                                                    "distinguishing_mark"}
-        stored = str(item["private_attributes"]).lower()
-        assert "yellow" not in stored and "wildcraft" not in stored and "tiffin" not in stored
+        attrs = item["private_attributes"]
+        # Free-text answers are only hashes; the zip colour became multiple choice with
+        # contrasting options, so "Yellow" is one of four labels, never marked as the answer.
+        stored = str({k: v for k, v in attrs.items() if k != "zipper_tag_colour"}).lower()
+        assert "wildcraft" not in stored and "tiffin" not in stored and "yellow" not in stored
+        zip_opts = attrs["zipper_tag_colour"]["choices"]
+        assert len(zip_opts) == 4 and "Yellow" in zip_opts and set(attrs["zipper_tag_colour"]) == {
+            "kind", "weight", "entries", "leaked", "choices"}
         assert db.custody_log.find_one({"event": "logged", "itemId": item["found_id"]})
         assert depot.get(f"/staff/items/{item['found_id']}/tag").status_code == 200
 
@@ -73,7 +79,8 @@ def test_full_journey_all_three_features(e2e):
         assert passenger.get(f"/passenger/claims/{claim_id}").status_code == 200
         assert passenger.get(f"/claims/{claim_id}/photo").status_code == 403
         questions = passenger.get(f"/claims/{claim_id}/questions").get_json()["questions"]
-        spoken = {"zipper_tag_colour": "மஞ்சள்", "content_item": "oru steel dabba", "brand": "wildcarft",
+        assert next(q for q in questions if q["id"] == "zipper_tag_colour")["options"]     # colour: tap one
+        spoken = {"zipper_tag_colour": "Yellow", "content_item": "oru steel dabba", "brand": "wildcarft",
                   "distinguishing_mark": "CSK super kings sticker"}
         resp = passenger.post(f"/claims/{claim_id}/answers",
                               json={"answers": {q["id"]: spoken[q["id"]] for q in questions}})

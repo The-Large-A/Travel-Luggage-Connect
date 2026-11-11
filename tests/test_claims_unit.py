@@ -146,11 +146,14 @@ def test_selection_is_randomised():
 
 # ── Trust score ──────────────────────────────────────────────────────────────
 def test_trust_score_is_weighted():
-    w = {q: ATTRIBUTES[q]["weight"] for q in ("brand", "content_item", "distinguishing_mark")}   # 1, 1.5, 1.5
+    # weights follow secrecy: a brand logo (visible) 0.75, a mark 1.0, what was inside (hidden) 2.0
+    w = {q: ATTRIBUTES[q]["weight"] for q in ("brand", "content_item", "distinguishing_mark")}
+    assert w == {"brand": 0.75, "content_item": 2.0, "distinguishing_mark": 1.0}
     assert trust_score({"brand": True, "content_item": True, "distinguishing_mark": True}, w) == 1.0
-    assert trust_score({"brand": False, "content_item": True, "distinguishing_mark": True}, w) == 0.75
-    assert trust_score({"brand": True, "content_item": True, "distinguishing_mark": False}, w) == 0.625
-    assert trust_score({"brand": True, "content_item": False, "distinguishing_mark": False}, w) == 0.25
+    assert trust_score({"brand": False, "content_item": True, "distinguishing_mark": True}, w) == 0.8
+    assert trust_score({"brand": True, "content_item": True, "distinguishing_mark": False}, w) == 0.7333
+    assert trust_score({"brand": True, "content_item": False, "distinguishing_mark": True}, w) == 0.4667   # seen ≠ owned
+    assert trust_score({"brand": True, "content_item": False, "distinguishing_mark": False}, w) == 0.2
 
 
 @pytest.mark.parametrize("score,verdict", [(1.0, VERIFIED), (0.75, VERIFIED), (0.7499, BORDERLINE),

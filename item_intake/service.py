@@ -200,7 +200,7 @@ class IntakeService:
                 frames[kind] = [self._abs(c["path"]) for c in draft["closeups"] if c["kind"] == kind]
             facts = analyse(frames, self.classifier, self.ocr, self.captioner,
                             progress=lambda pct, stage: self._progress(draft_id, pct, stage))
-            raw, choices, report = build_answers(facts, self.config.answer_min_confidence)
+            raw, choices, report, qcat = build_answers(facts, self.config.answer_min_confidence)
             self._progress(draft_id, 92, "Saving and matching")
             images = [f["path"] for f in draft["frames"]["outside"]] + [f["path"] for f in draft["frames"]["inside"]]
             images += [c["path"] for c in draft["closeups"]]
@@ -210,6 +210,7 @@ class IntakeService:
                  "category": facts["category"]},
                 image_paths=images, raw_attributes=raw, attribute_choices=choices,
                 extra={"captureMode": "camera_scan", "draftId": draft_id, "ocr_text": facts.get("ocrText", ""),
+                       "questionCategory": qcat, "itemNoun": facts.get("noun"),
                        "attributes": {
                            "category": {"value": facts["category"], "confidence": facts["categoryConfidence"]},
                            "colours": facts.get("colours"), "material": facts.get("material"),

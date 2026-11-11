@@ -240,7 +240,16 @@ def contrasting_colours(true_colour: str, n: int = 3, min_delta: float = 25.0) -
         return []
     chosen = [true_colour]
     target = COLOUR_PRIOR[true_colour]
-    for cand in sorted(COLOUR_LAB, key=lambda c: (abs(COLOUR_PRIOR[c] - target), c)):
+    # An owner who half-remembers a neighbouring shade (charcoal for black) should
+    # still find the true colour the closest option, so options next to one of the
+    # true colour's own neighbours are mildly penalised (a soft rule: a strict one
+    # leaves too few colours and wrecks flatness).
+    near = {c for c in COLOUR_LAB if c != true_colour and colours_confusable(c, true_colour)}
+
+    def cost(c):
+        second_order = any(colours_confusable(c, nb) for nb in near)
+        return (abs(COLOUR_PRIOR[c] - target) + (0.03 if second_order else 0.0), c)
+    for cand in sorted(COLOUR_LAB, key=cost):
         if cand in chosen:
             continue
         if any(colours_confusable(cand, c) or delta_e2000(COLOUR_LAB[cand], COLOUR_LAB[c]) < min_delta

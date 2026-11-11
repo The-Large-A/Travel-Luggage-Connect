@@ -33,6 +33,7 @@ from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STAT
 from match_notify.service import seq_visible
 from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
 from claims import encode_private_attributes, new_tag_id
+from claims.options import build_choices
 from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
                         vocabulary_payload)
 from item_intake import init_item_intake
@@ -950,8 +951,18 @@ def create_found_report(depot: dict, data: dict, image_paths=(), raw_attributes=
     # Feature 3: private attributes are hashed right here; the raw answers are never stored.
     if category not in ITEM_CATEGORIES:
         category = 'other'
+    # Questions are asked for the category the camera was sure of ("other" if it
+    # was not); staff-typed items use the category staff picked.
+    question_category = extra.get("questionCategory") or category
+    raw_attributes = {k: v for k, v in (raw_attributes or {}).items() if isinstance(v, str) and v.strip()}
+    if attribute_choices is None:
+        # Typed by staff: colour answers become multiple choice with contrasting
+        # options (an owner remembering "navy" must not face navy/black/blue).
+        raw_attributes, attribute_choices = build_choices(
+            raw_attributes, question_category, {k: a["kind"] for k, a in PRIVATE_ATTRIBUTES.items()},
+            colours_only=True)
     private_attributes = encode_private_attributes(
-        raw_attributes or {}, category, public_description, claims_service.answer_key,
+        raw_attributes, question_category, public_description, claims_service.answer_key,
         claims_state.config.fuzzy_min_token_length, choices=attribute_choices)
 
     report = {

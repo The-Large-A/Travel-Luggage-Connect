@@ -17,7 +17,7 @@ from item_intake import vision
 from item_intake.analysis import looks_like_id, redact_ids
 from item_intake.captioner import BasicCaptioner
 from item_intake.questions import build_answers, public_description
-from vocabulary import BRANDS
+from vocabulary import BRANDS, CONTENT_POOLS
 
 RNG = np.random.default_rng(3)
 
@@ -96,29 +96,45 @@ FACTS = {"category": "bag", "categoryConfidence": 0.9, "noun": "bag",
 
 
 def test_only_confident_facts_become_questions():
-    raw, choices, report = build_answers(FACTS, 0.6)
+    raw, choices, report, qcat = build_answers(FACTS, 0.6)
+    assert qcat == "bag"
     assert set(raw) == {"zipper_tag_colour", "content_item", "brand", "tag_text"}
     assert report["distinguishing_mark"]["asQuestion"] is False           # 0.5 < 0.6
     assert "Wildcraft" not in repr(report) and "ARUN" not in repr(report)  # report never holds values
-    assert choices["zipper_tag_colour"][0] == "yellow" and len(choices["zipper_tag_colour"]) == 3
-    assert "blue" not in choices["zipper_tag_colour"]                     # opposite of yellow is not offered
+    zip_opts = [o.lower() for o in choices["zipper_tag_colour"]]
+    assert zip_opts[0] == "yellow" and len(zip_opts) == 4
+    # v1 offered yellow / orange / gold — the shades an owner mixes up. Now: none of them.
+    assert not {"orange", "gold", "white"} & set(zip_opts)
     assert set(choices["brand"]) <= set(BRANDS["bag"])                    # bag brands only, never Acer/Redmi
+    assert raw["content_item"] == "Tiffin" and "Tiffin" in choices["content_item"]
+    assert set(o.lower() for o in choices["content_item"]) <= set(CONTENT_POOLS["bag"])   # things a bag holds
     assert public_description(FACTS) == "Black bag"
 
 
-def test_brand_distractors_follow_the_brand_not_a_misread_category():
-    facts = {**FACTS, "category": "documents", "noun": "document folder"}
-    _raw, choices, _ = build_answers(facts, 0.6)
-    assert set(choices["brand"]) <= set(BRANDS["bag"])
+def test_questions_follow_the_item_kind():
+    docs = {**FACTS, "category": "documents", "noun": "document folder"}
+    raw, _choices, report, qcat = build_answers(docs, 0.6)
+    assert qcat == "documents" and "brand" not in raw and "zipper_tag_colour" not in raw   # no brand of a file
+    assert report["brand"]["skipped"] == "does not suit this item"
+    assert {"content_item", "tag_text"} <= set(raw)
+
+
+def test_unsure_category_gets_only_questions_that_suit_anything():
+    unsure = {**FACTS, "categoryConfidence": 0.55, "categoryMargin": 0.1}
+    raw, choices, report, qcat = build_answers(unsure, 0.6)
+    assert qcat == "other" and set(raw) == {"tag_text"} and not choices
+    assert report["brand"]["skipped"] == "category uncertain"
+    close_call = {**FACTS, "categoryConfidence": 0.85, "categoryMargin": 0.12}           # sure, but close 2nd
+    assert build_answers(close_call, 0.6)[3] == "other"
 
 
 def test_choice_questions_render_options_and_still_hash_the_answer():
-    raw, choices, _ = build_answers(FACTS, 0.6)
+    raw, choices, _, _ = build_answers(FACTS, 0.6)
     key = b"k" * 32
     attrs = encode_private_attributes(raw, "bag", "Black bag", key, 5, choices=choices)
     assert "Wildcraft" not in repr({k: v["entries"] for k, v in attrs.items()})
     view_q = question_view("brand", attrs)
-    assert sorted(view_q["options"]) == sorted(choices["brand"]) and len(view_q["options"]) == 3
+    assert sorted(view_q["options"]) == sorted(choices["brand"]) and len(view_q["options"]) == 4
     assert "options" not in question_view("tag_text", attrs)                # free text stays free text
     item = {"category": "bag", "private_attributes": attrs}
     for _ in range(20):
@@ -135,7 +151,7 @@ def test_a_round_is_never_only_multiple_choice():
     assert select_questions({"category": "bag", "private_attributes": attrs}) == ([], None)   # → staff review
 
 
-def test_reserve_question_prefers_free_text():
+def test_reserve_question_prefers_hidden_free_text():
     raw = {"zipper_tag_colour": "yellow", "content_item": "tiffin", "brand": "Wildcraft",
            "tag_text": "ARUN K", "distinguishing_mark": "CSK sticker"}
     choices = {"zipper_tag_colour": ["yellow", "orange", "gold"], "content_item": ["tiffin", "book", "keys"],
@@ -145,8 +161,9 @@ def test_reserve_question_prefers_free_text():
         chosen, reserve = select_questions({"category": "bag", "private_attributes": attrs})
         texts = [q for q in chosen if "choices" not in attrs[q]]
         assert texts and sum(1 for q in chosen if "choices" in attrs[q]) <= 2
-        if len(texts) < 2:
-            assert "choices" not in attrs[reserve]
+        assert {"content_item", "tag_text"} & set(chosen)                 # every round asks something hidden
+        if reserve and "tag_text" not in chosen:
+            assert reserve == "tag_text"                                  # hidden AND free text first
 
 
 def test_invalid_choice_lists_are_dropped():
