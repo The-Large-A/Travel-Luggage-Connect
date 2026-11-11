@@ -55,7 +55,11 @@ IDENTIFYING = "identifying"
 # Measured on the matching benchmark (tools/match_benchmark.py); a similarity
 # object can override them with a `null_stats` attribute.
 TEXT_NULL = (0.29, 0.15)          # all-MiniLM-L6-v2, lost description vs found notes (measured)
-IMAGE_NULL = (0.62, 0.08)         # CLIP ViT-B/32, photo vs photo
+IMAGE_NULL = (0.70, 0.11)         # CLIP ViT-B/32, photo vs photo of a DIFFERENT item of the same kind
+# (measured on 48 Commons photos, tests/test_media.py). CLIP knows "a backpack",
+# not "this backpack": the same object scores 0.57-0.96, different ones up to
+# 0.91, so a photo only IDENTIFIES an item when it is near-identical.
+PHOTO_IDENTICAL = 0.92
 CROSS_NULL = (0.21, 0.025)        # CLIP ViT-B/32, description vs photo
 SHRINK_K = 4                      # pseudo-observations of the null when calibrating on a block
 
@@ -456,7 +460,7 @@ class Matcher:
         if raw.get("image") is not None:
             z = _z(raw["image"], background.get("image"), img_null)
             stats["imageZ"] = round(z, 2)
-            kind = IDENTIFYING if z >= 3 and raw["image"] >= 0.92 else "support"
+            kind = IDENTIFYING if z >= 3 and raw["image"] >= PHOTO_IDENTICAL else "support"
             ev.add("image", "photo", _z_bits(z, 4.0), f"photos look alike (z={z:.1f})" if z >= 1
                    else "photos look different" if z < -1 else "photos: no clear signal", kind)
         cross_null = getattr(self.image_sim, "cross_null_stats", CROSS_NULL)
