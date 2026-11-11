@@ -16,7 +16,8 @@ from passenger_auth.timeutil import utcnow
 from .channels import MESSAGE_LOG, build_channels
 from .config import MatchNotifyConfig
 from .routes import bp, require_staff
-from .service import (ACTIVE_STATUSES, FOUND, LOST, MATCHES, NOTIFICATIONS, MatchNotifyService)
+from .service import (ACTIVE_STATUSES, FOUND, LOST, MATCHES, NOTIFICATIONS, MatchNotifyService,
+                      backfill_passenger_seqs)
 from .worker import NotificationWorker
 
 __all__ = ["init_match_notify", "MatchNotifyConfig", "require_staff", "ACTIVE_STATUSES",
@@ -60,10 +61,15 @@ def init_match_notify(app, db, config=None, channels=None, clock=None, environ=N
     config = config or MatchNotifyConfig.from_env(env)
     clock = clock or utcnow
     channels = channels or build_channels(config, db, env, clock=clock)
-    service = MatchNotifyService(db, config, channels, clock, rematch_lost, rematch_found)
+    auth = app.extensions.get("passenger_auth")
+    service = MatchNotifyService(db, config, channels, clock, rematch_lost, rematch_found,
+                                 bookings=getattr(auth, "bookings", None))
     migrated = service.backfill_legacy_matches()
     if migrated:
         logger.info("Backfilled %d legacy match document(s) for Feature 2.", migrated)
+    stamped = backfill_passenger_seqs(db, service.bookings)
+    if stamped:
+        logger.info("Stamped the owning passenger on %d legacy report/claim document(s).", stamped)
     ensure_match_indexes(db)
     worker = NotificationWorker(service, config.worker_interval_seconds)
     service.on_enqueue = worker.wake

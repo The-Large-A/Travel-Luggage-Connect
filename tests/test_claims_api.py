@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 
 from claims.tokens import sign_payload
-from conftest import (ARUN, BAG_TRUTH, DEPOT_B, MULTI_SHARED, PRIYA, F3, PNG_BYTES, make_claims_config)
+from conftest import (ARUN, BAG_TRUTH, DEPOT_B, MULTI_SHARED, PRIYA, F3, PNG_BYTES, TEST_SECRET, make_claims_config)
 from passenger_auth.timeutil import from_db
 
 
@@ -675,7 +675,7 @@ def test_seed_claims_scenarios_and_idempotency(db, clock, tmp_path):
     from conftest import TEST_SECRET
     ensure_match_indexes(db)
     ensure_claim_indexes(db)
-    seed_matches(db, now=clock())
+    seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
     result = seed_claims(db, TEST_SECRET, now=clock(), upload_dir=str(tmp_path))
     assert result == {"ready_for_pickup": "token_issued", "conflict_winner": "token_issued",
                       "borderline_staff_review": "staff_review", "expired_token": "token_issued",
@@ -690,3 +690,21 @@ def test_seed_claims_scenarios_and_idempotency(db, clock, tmp_path):
                                     for i in seeded)
     again = seed_claims(db, TEST_SECRET, now=clock(), upload_dir=str(tmp_path))
     assert set(again.values()) == {"already seeded", 0} and db.claims.count_documents({}) == 4
+
+
+def test_shared_phone_passengers_cannot_open_or_see_each_others_claim(f3):
+    """Senthil (seq 1) and Meena (seq 2) share T26100105 and one phone."""
+    from conftest import AuthFlow
+    from passenger_auth.identity import mock_number_for
+    match = f3.notified_match(MULTI_SHARED, tracking="TRK-SENT0001", item=f3.item())
+    senthil = f3.login_passenger(MULTI_SHARED, client=f3.app.test_client())
+    meena = f3.app.test_client()
+    flow = AuthFlow(meena, f3.sms, f3.clock)
+    flow.verify_identity(mock_number_for("Meena Senthil"))
+    assert flow.link("T26100105").status_code == 200
+    assert meena.post("/claims", json={"matchId": str(match["_id"])}).status_code == 404
+    claim_id = f3.open_claim(senthil, match)
+    assert _claim(f3, claim_id)["passengerSeq"] == 1
+    assert meena.get(f"/claims/{claim_id}").status_code == 404
+    assert meena.get("/claims").get_json()["claims"] == []
+    assert len(senthil.get("/claims").get_json()["claims"]) == 1

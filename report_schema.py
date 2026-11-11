@@ -6,6 +6,7 @@ existing documents are left alone. Applied at startup; failures are logged only.
 import logging
 
 from passenger_auth.identity import MOCK_UIDAI, MOCK_UIDAI_VALIDATOR
+from seed_bookings import BOOKINGS_VALIDATOR
 from vocabulary import CATEGORIES, STORAGE_KEYS
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,8 @@ ITEM_DRAFTS_VALIDATOR = {"$jsonSchema": {"bsonType": "object",
 }}}
 
 VALIDATORS = {"lost_reports": LOST_REPORTS_VALIDATOR, "found_reports": FOUND_REPORTS_VALIDATOR,
-              "item_drafts": ITEM_DRAFTS_VALIDATOR, MOCK_UIDAI: MOCK_UIDAI_VALIDATOR}
+              "item_drafts": ITEM_DRAFTS_VALIDATOR, MOCK_UIDAI: MOCK_UIDAI_VALIDATOR,
+              "bookings": BOOKINGS_VALIDATOR}       # both mock databases accept sealed records only
 
 
 def apply_phase2_validators(db) -> None:

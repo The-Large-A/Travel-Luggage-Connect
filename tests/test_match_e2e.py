@@ -17,7 +17,7 @@ import mongomock
 import pymongo
 import pytest
 
-from conftest import ARUN, PRIYA, RecordingSmsProvider
+from conftest import ARUN, PRIYA, AuthFlow, RecordingSmsProvider
 from passenger_auth.timeutil import IST
 
 ENV = {
@@ -87,8 +87,11 @@ def e2e(real_app):
     db = real_app.db
     for name in db.list_collection_names():
         db[name].delete_many({})
+    from passenger_auth.identity import seed_mock_uidai
     from seed_bookings import seed_bookings
-    seed_bookings(db)
+    state = real_app.app.extensions["passenger_auth"]
+    seed_bookings(db, signing_secret=ENV["SIGNING_SECRET"], vault=state.vault)
+    seed_mock_uidai(db, ENV["SIGNING_SECRET"], vault=state.vault)
     # Transport master: one route Chennai → Villupuram → Salem, one trip/bus.
     db.stops.insert_many([
         {"stop_id": "S1", "name": "Chennai CMBT", "city": "Chennai", "lat": 13.07, "lon": 80.2},
@@ -103,17 +106,15 @@ def e2e(real_app):
     db.depots.insert_one({"phone": "9000000004", "name": "Salem Depot", "password": "pass123",
                           "stop": "Salem", "city": "Salem", "depot_code": "SLM"})
     sms = RecordingSmsProvider()
-    otp_service = real_app.app.extensions["passenger_auth"].otp
-    original_sms = otp_service.sms
-    otp_service.sms = sms
+    identity = state.identity
+    original_sms = identity.sms
+    identity.sms = sms
     yield real_app, db, sms
-    otp_service.sms = original_sms
+    identity.sms = original_sms
 
 
 def _login(client, sms, ident):
-    assert client.post("/auth/otp/request", json=ident).status_code == 202
-    resp = client.post("/auth/otp/verify", json={**ident, "otp": sms.last_otp()})
-    assert resp.status_code == 200
+    AuthFlow(client, sms, None).login(ident)         # layer 1 Aadhaar + OTP, then layer 2 PNR
     return client
 
 

@@ -11,6 +11,7 @@ import io
 import os
 
 from conftest import ARUN, PNG_BYTES
+from passenger_auth.identity import mock_number_for
 from test_match_e2e import _login, _report_lost, _today, e2e, real_app  # noqa: F401  (fixtures)
 
 
@@ -93,9 +94,17 @@ def test_full_journey_all_three_features(e2e):
         assert depot.get("/staff/claims-desk").status_code == 200
         check = depot.post("/pickup/verify", json={"token": token["qrPayload"], "qrTagId": item["qrTagId"]})
         assert check.get_json()["valid"] is True
-        done = depot.post("/pickup/complete", json={"token": token["qrPayload"], "qrTagId": item["qrTagId"],
-                                                    "idChecked": True, "staffName": "Counter 2"})
-        assert done.status_code == 200
+        # The passenger logged in with Aadhaar (layer 1), so the counter re-checks it:
+        # last 4 digits from the card + an OTP to the Aadhaar-linked phone. A tick is not enough.
+        assert check.get_json()["claim"]["identityCheck"] == "aadhaar_otp"
+        ticked = depot.post("/pickup/complete", json={"token": token["qrPayload"], "qrTagId": item["qrTagId"],
+                                                      "idChecked": True, "staffName": "Counter 2"})
+        assert ticked.status_code == 400
+        assert depot.post("/pickup/identity/otp", json={"token": token["qrPayload"]}).status_code == 200
+        done = depot.post("/pickup/complete", json={
+            "token": token["qrPayload"], "qrTagId": item["qrTagId"], "idChecked": True, "staffName": "Counter 2",
+            "idLast4": mock_number_for("Arun Kumar")[-4:], "idOtp": sms.last_otp("+919876543210")})
+        assert done.status_code == 200, done.get_json()
 
         # Custody log, item state, report state, passenger notified.
         handover = db.custody_log.find_one({"event": "handover"})

@@ -22,9 +22,11 @@ Ravi Senthil has neither (in-app notifications only), everyone else WhatsApp onl
 
 Phase 2 additions:
   * idProof — TNSTC records "Identity Type and ID No." on every online booking.
-    Every passenger booked with their (mock) Aadhaar except Priya, who booked
-    with a driving licence: she shows the PNR + mobile fallback login. Only a
-    keyed token and the last 4 digits are stored (see passenger_auth/identity.py).
+    Every passenger booked with their (mock) Aadhaar, because login is always two
+    layers: Aadhaar first, then a PNR booked under that same Aadhaar. Only a
+    keyed token and the last 4 digits are kept (see passenger_auth/identity.py).
+  * encryption — this is the mock TNSTC PNR database: every row is sealed with
+    AES-256-GCM and found by a keyed index of the PNR (passenger_auth/stores.py).
   * journey links — tripId, routeId, boardingStopId, alightingStopId, seatNo per
     passenger, resolved against the seeded transport network when it exists, so
     the report form can fill the journey from the ticket.
@@ -39,10 +41,12 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 from passenger_auth import ensure_auth_indexes
-from passenger_auth.bookings import BOOKINGS
-from passenger_auth.identity import booking_id_proof, seed_mock_uidai
+from passenger_auth.identity import SEALED_SCHEMA, booking_id_proof, seed_mock_uidai
+from passenger_auth.identity_service import ensure_identity_indexes
 from passenger_auth.phone import normalize_phone
+from passenger_auth.stores import BOOKINGS, BookingStore, drop_legacy_indexes
 from passenger_auth.timeutil import to_db, today_ist, utcnow
+from passenger_auth.vault import Vault
 
 # (pnr, seq, name, phone as typed by the booking system, status, route, days ago)
 SAMPLE_BOOKINGS = [
@@ -64,48 +68,47 @@ CONTACTS = {
     ("T26100105", 3): (False, None),                        # no WhatsApp, no email → in-app only
 }
 
-# Phase 2: ID used at booking (everyone else booked with Aadhaar) and seat per passenger.
-OTHER_ID_PROOF = {("T26100102", 1): {"type": "driving_licence", "token": None, "last4": "4821"}}
+# Seat per passenger (Phase 2 journey links).
 SEATS = {("T26100101", 1): 12, ("T26100102", 1): 7, ("T26100103", 1): 21, ("T26100104", 1): 3,
          ("T26100105", 1): 14, ("T26100105", 2): 15, ("T26100105", 3): 16, ("T26100106", 1): 9}
 
+# The database itself refuses clear-text bookings: only the PNR index, the
+# passenger number, the sealed blob and timestamps may exist on a document.
 BOOKINGS_VALIDATOR = {
     "$jsonSchema": {
         "bsonType": "object",
-        "required": ["pnr", "passengerSeq", "passengerName", "registeredPhone", "status", "travelDate"],
+        "required": ["pnrIndex", "passengerSeq", "sealed"],
+        "additionalProperties": False,
         "properties": {
-            "pnr":             {"bsonType": "string"},
-            "passengerSeq":    {"bsonType": ["int", "long"]},
-            "passengerName":   {"bsonType": "string"},
-            "registeredPhone": {"bsonType": "string"},
-            "status":          {"enum": ["confirmed", "completed", "cancelled"]},
-            "route":           {"bsonType": "string"},
-            "travelDate":      {"bsonType": "string"},
-            "whatsapp":        {"bsonType": "bool"},
-            "email":           {"bsonType": ["string", "null"]},
-            "idProof":         {"bsonType": "object", "required": ["type"],
-                                "properties": {"type": {"enum": ["aadhaar", "driving_licence", "voter_id",
-                                                                 "passport", "pan", "ration_card"]},
-                                               "token": {"bsonType": ["string", "null"]},
-                                               "last4": {"bsonType": "string"}}},
-            "routeId":         {"bsonType": ["string", "null"]},
-            "tripId":          {"bsonType": ["string", "null"]},
-            "boardingStopId":  {"bsonType": ["string", "null"]},
-            "alightingStopId": {"bsonType": ["string", "null"]},
-            "seatNo":          {"bsonType": ["int", "long", "null"]},
+            "_id":          {},
+            "pnrIndex":     {"bsonType": "string"},
+            "passengerSeq": {"bsonType": ["int", "long"]},
+            "sealed":       SEALED_SCHEMA,
+            "createdAt":    {"bsonType": "date"},
+            "updatedAt":    {"bsonType": "date"},
         },
     }
 }
 
 
-def seed_bookings(db, now=None, signing_secret=None) -> int:
+def booking_store(db, signing_secret, vault=None) -> BookingStore:
+    """The encrypted PNR store, keyed exactly like the app (same SIGNING_SECRET / data keys)."""
+    return BookingStore(db, vault or Vault.from_env(signing_secret))
+
+
+def seed_bookings(db, now=None, signing_secret=None, vault=None) -> int:
     """
-    Upsert the sample bookings into `db`. Returns the number of rows written.
-    With `signing_secret`, each row also gets its idProof token (must be the
-    app's SIGNING_SECRET, or the tokens will not match at login).
+    Upsert the sample bookings (encrypted) into `db`. Returns the rows written.
+    `signing_secret` must be the app's SIGNING_SECRET: it keys the idProof
+    tokens and, unless DATA_ENCRYPTION_KEYS is set, the encryption itself.
     """
+    if not signing_secret:
+        raise ValueError("seed_bookings needs the app's SIGNING_SECRET (bookings are encrypted)")
     now = now or utcnow()
     today = today_ist(now)
+    store = booking_store(db, signing_secret, vault)
+    drop_legacy_indexes(db)
+    store.migrate_plaintext()
     for pnr, seq, name, phone, status, route, days_ago in SAMPLE_BOOKINGS:
         whatsapp, email = CONTACTS.get((pnr, seq), (True, None))
         fields = {
@@ -116,12 +119,9 @@ def seed_bookings(db, now=None, signing_secret=None) -> int:
             "travelDate":      (today - timedelta(days=days_ago)).isoformat(),
             "whatsapp":        whatsapp,
             "email":           email,
-            "updatedAt":       to_db(now),
+            "idProof":         booking_id_proof(signing_secret, name),
         }
-        if signing_secret:
-            fields["idProof"] = OTHER_ID_PROOF.get((pnr, seq)) or booking_id_proof(signing_secret, name)
-        db[BOOKINGS].update_one({"pnr": pnr, "passengerSeq": seq},
-                                {"$set": fields, "$setOnInsert": {"createdAt": to_db(now)}}, upsert=True)
+        store.upsert(pnr, seq, fields, now=to_db(now))
     return len(SAMPLE_BOOKINGS)
 
 
@@ -145,13 +145,14 @@ def _find_route(db, origin: str, dest: str):
     return None
 
 
-def link_bookings_to_transport(db) -> int:
+def link_bookings_to_transport(db, signing_secret, vault=None) -> int:
     """
     Give every sample booking a real journey in the seeded transport network:
     route, first trip (by departure), board at the origin, alight mid-route (so
     the bus — and any forgotten bag — continues to downstream depots), and a
     seat that fits the bus. No-op (returns 0) when the network is not seeded.
     """
+    store = booking_store(db, signing_secret, vault)
     linked = 0
     for pnr, seq, _name, _phone, _status, route_text, _days in SAMPLE_BOOKINGS:
         origin, dest = _route_cities(route_text)
@@ -165,11 +166,11 @@ def link_bookings_to_transport(db) -> int:
         seq_ids = route["stop_sequence"]
         seat = SEATS.get((pnr, seq), 10)
         capacity = int(bus.get("capacity") or 40)
-        db[BOOKINGS].update_one({"pnr": pnr, "passengerSeq": seq}, {"$set": {
+        store.upsert(pnr, seq, {
             "routeId": route["route_id"], "tripId": trip["trip_id"],
             "boardingStopId": seq_ids[0], "alightingStopId": seq_ids[max(1, len(seq_ids) // 2)],
             "seatNo": min(seat, capacity),
-        }})
+        })
         linked += 1
     return linked
 
@@ -193,13 +194,15 @@ def main():
         print("SIGNING_SECRET (32+ chars) must be set: booking ID tokens and the mock UIDAI use it.")
         return
     db = MongoClient(uri)["tn_bus_lost_found"]
+    vault = Vault.from_env(secret)
+    n = seed_bookings(db, signing_secret=secret, vault=vault)     # also seals any old clear-text rows
+    citizens = seed_mock_uidai(db, secret, vault=vault)
     apply_bookings_validator(db)
     ensure_auth_indexes(db)
-    n = seed_bookings(db, signing_secret=secret)
-    citizens = seed_mock_uidai(db, secret)
-    linked = link_bookings_to_transport(db)
+    ensure_identity_indexes(db)
+    linked = link_bookings_to_transport(db, secret, vault=vault)
     print(f"Seeded {n} booking rows across {len({b[0] for b in SAMPLE_BOOKINGS})} PNRs, "
-          f"{citizens} mock UIDAI citizens; {linked} rows linked to real trips.")
+          f"{citizens} mock UIDAI citizens (both encrypted); {linked} rows linked to real trips.")
 
 
 if __name__ == "__main__":

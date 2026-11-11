@@ -150,22 +150,55 @@ def client(app):
     return app.test_client()
 
 
+def aadhaar_for(ident) -> str:
+    """The mock Aadhaar number of the passenger a test identity (pnr, phone) stands for."""
+    from passenger_auth.identity import mock_number_for
+    from passenger_auth.phone import normalize_phone
+    from seed_bookings import SAMPLE_BOOKINGS
+    phone = normalize_phone(ident["phone"])
+    for pnr, _seq, name, raw_phone, *_ in SAMPLE_BOOKINGS:
+        if pnr == ident["pnr"] and normalize_phone(raw_phone) == phone:
+            return mock_number_for(name)
+    raise KeyError(ident)
+
+
+def passenger_seq_for(ident) -> int:
+    """The passengerSeq of the sample-booking passenger a test identity (pnr, phone) stands for."""
+    from passenger_auth.phone import normalize_phone
+    from seed_bookings import SAMPLE_BOOKINGS
+    phone = normalize_phone(ident["phone"])
+    return min(seq for pnr, seq, _n, raw, *_ in SAMPLE_BOOKINGS
+               if pnr == ident["pnr"] and normalize_phone(raw) == phone)
+
+
 class AuthFlow:
-    """Small helper so tests read as the passenger journey."""
+    """
+    Small helper so tests read as the passenger journey. Login is always two
+    layers: Aadhaar / VID + OTP (layer 1), then the ticket's PNR (layer 2).
+    """
 
     def __init__(self, client, sms, clock):
         self.client, self.sms, self.clock = client, sms, clock
 
-    def request(self, pnr, phone, **kw):
-        return self.client.post("/auth/otp/request", json={"pnr": pnr, "phone": phone}, **kw)
+    def id_request(self, number, consent="yes", **kw):
+        return self.client.post("/auth/id/otp/request", json={"idNumber": number, "consent": consent}, **kw)
 
-    def verify(self, pnr, phone, otp, **kw):
-        return self.client.post("/auth/otp/verify", json={"pnr": pnr, "phone": phone, "otp": otp}, **kw)
+    def id_verify(self, number, otp, **kw):
+        return self.client.post("/auth/id/otp/verify", json={"idNumber": number, "otp": otp}, **kw)
 
-    def login(self, ident):
-        assert self.request(ident["pnr"], ident["phone"]).status_code == 202
-        otp = self.sms.last_otp()
-        resp = self.verify(ident["pnr"], ident["phone"], otp)
+    def link(self, pnr, next_url=None, **kw):
+        url = "/auth/id/link" + (f"?next={next_url}" if next_url else "")
+        return self.client.post(url, json={"pnr": pnr}, **kw)
+
+    def verify_identity(self, number):
+        assert self.id_request(number).status_code == 202
+        resp = self.id_verify(number, self.sms.last_otp())
+        assert resp.status_code == 200, resp.get_json()
+        return resp
+
+    def login(self, ident, next_url=None):
+        self.verify_identity(aadhaar_for(ident))
+        resp = self.link(ident["pnr"], next_url)
         assert resp.status_code == 200, resp.get_json()
         return resp
 
@@ -273,7 +306,8 @@ class F2:
                "name": "Arun Kumar", "phone": normalize_phone(ident["phone"]), "status": "pending",
                "created_at": "2026-10-20T10:00:00"}
         if owned:
-            doc.update(ownerPnr=ident["pnr"], ownerPhone=normalize_phone(ident["phone"]))
+            doc.update(ownerPnr=ident["pnr"], ownerPhone=normalize_phone(ident["phone"]),
+                       passengerSeq=passenger_seq_for(ident))
         doc.update(extra)
         self.db.lost_reports.insert_one(doc)
         return self.db.lost_reports.find_one({"tracking_id": tracking})

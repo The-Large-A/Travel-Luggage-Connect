@@ -1,13 +1,15 @@
 """
-Aadhaar / VID login and PNR binding (Phase 2, Feature A) on top of the mock UIDAI.
+Two-layer passenger login — ALWAYS both layers, in this order:
 
-Flow:
-  1. consent + Aadhaar number or VID → OTP to the phone linked with that identity
-     (generic response: never reveals whether the number is registered);
-  2. OTP verified → short-lived *identity session* (cookie `tnstc_idn`);
-  3. PNR entered → accepted only if a passenger on that booking carries the SAME
-     ID token (TNSTC records "Identity Type and ID No." per booking) AND the
-     names agree; a normal passenger session is then issued for that passenger.
+  Layer 1 — Aadhaar: consent + Aadhaar number or VID, checked against the
+     encrypted mock UIDAI database → OTP to the phone linked with that identity
+     (generic response: never reveals whether the number is registered); the
+     verified OTP gives a short-lived *identity session* (cookie `tnstc_idn`).
+  Layer 2 — PNR: the ticket's PNR, checked against the encrypted mock TNSTC PNR
+     database. Accepted only if the booking exists, is still eligible, and a
+     passenger on it carries the SAME ID token (TNSTC records "Identity Type and
+     ID No." per booking) with an agreeing name. Only then is a passenger
+     session issued. There is no PNR-only (or Aadhaar-only) way in.
 
 identity_otps document:
     subject (aadhaar token), phone, purpose (login | pickup), otpHash, otpSalt,
@@ -26,7 +28,7 @@ from difflib import SequenceMatcher
 from itsdangerous import BadSignature, URLSafeSerializer
 from pymongo import ReturnDocument
 
-from .bookings import BOOKINGS, find_eligible_booking, is_eligible
+from .bookings import find_eligible_booking, is_eligible
 from .errors import AuthError
 from .identity import AADHAAR, IdNumberError, find_citizen, id_token, mask_id, parse_id_number, token_key
 from .otp import derive_key, generate_otp, hash_otp, is_valid_otp_format, new_salt, otp_matches
@@ -43,8 +45,8 @@ LOGIN, PICKUP = "login", "pickup"
 
 GENERIC_ID_MESSAGE = ("If this Aadhaar number or VID is registered, a 6-digit OTP has been sent "
                       "to the mobile number linked with it.")
-NOT_LINKED_MESSAGE = ("This PNR is not linked to your Aadhaar. If you booked with another ID "
-                      "(driving licence, voter ID, PAN…), log in with your PNR and mobile number instead.")
+NOT_LINKED_MESSAGE = ("This PNR is not booked under your verified Aadhaar. Check the PNR on the ticket, "
+                      "or log in with the Aadhaar of the passenger it was booked for.")
 LINK_ATTEMPTS_PER_HOUR = 10
 
 
@@ -86,8 +88,10 @@ def names_match(a, b) -> bool:
 
 
 class IdentityService:
-    def __init__(self, db, config, sms, limiter, clock):
+    def __init__(self, db, config, sms, limiter, clock, citizens, bookings):
         self.db = db
+        self.citizens = citizens            # encrypted mock UIDAI (layer 1)
+        self.bookings = bookings            # encrypted mock TNSTC PNR database (layer 2)
         self.config = config
         self.sms = sms
         self.limiter = limiter
@@ -202,7 +206,7 @@ class IdentityService:
         if count >= cfg.otp_max_requests_per_pnr_per_hour:
             raise AuthError(429, "id_request_limit", "Too many OTP requests for this number. Please try later.",
                             retry_after=retry)
-        citizen = find_citizen(self.db, self.token_key, kind, digits)
+        citizen = find_citizen(self.citizens, self.token_key, kind, digits)
         locked = bool(citizen and self._active_lock(citizen.aadhaar_token, LOGIN))
         gate = self.limiter.acquire_cooldown("id-otp-resend", subject_probe, cfg.otp_resend_seconds)
         if not gate.allowed:
@@ -221,7 +225,7 @@ class IdentityService:
         kind, digits = self.parse(raw_id)
         otp = otp_raw.strip() if isinstance(otp_raw, str) else otp_raw
         self._ip_limit("ip-id-otp-verify", ip, self.config.otp_ip_verify_limit)
-        citizen = find_citizen(self.db, self.token_key, kind, digits)
+        citizen = find_citizen(self.citizens, self.token_key, kind, digits)
         if not citizen:
             if not is_valid_otp_format(otp):
                 raise AuthError(400, "invalid_request", "The OTP must be exactly 6 digits.",
@@ -282,7 +286,7 @@ class IdentityService:
         if count >= LINK_ATTEMPTS_PER_HOUR:
             raise AuthError(429, "link_limit", "Too many PNR attempts. Please try again later.", retry_after=retry)
         self.limiter.record_event("id-link", identity.aadhaar_token, 3600)
-        rows = [d for d in self.db[BOOKINGS].find({"pnr": pnr}).sort("passengerSeq", 1)
+        rows = [d for d in self.bookings.rows(pnr)
                 if (d.get("idProof") or {}).get("token") == identity.aadhaar_token]
         if not rows or not names_match(rows[0].get("passengerName"), identity.name):
             raise AuthError(404, "pnr_not_linked", NOT_LINKED_MESSAGE)
@@ -292,7 +296,7 @@ class IdentityService:
             raise AuthError(403, "booking_not_eligible",
                             "This booking is cancelled or too old for Lost & Found access.")
         phone = try_normalize_phone(row.get("registeredPhone"))
-        booking = find_eligible_booking(self.db, pnr, phone, today, self.config.booking_access_window_days)
+        booking = find_eligible_booking(self.bookings, pnr, phone, today, self.config.booking_access_window_days)
         if booking is None:
             raise AuthError(404, "pnr_not_linked", NOT_LINKED_MESSAGE)
         logger.info("PNR %s linked to identity %s (passenger %s).", pnr, mask_id(identity.last4),
@@ -302,8 +306,7 @@ class IdentityService:
 
     # ── pickup re-check (Feature F) ──────────────────────────────────────────
     def citizen_by_token(self, aadhaar_token):
-        doc = self.db["mock_uidai"].find_one({"aadhaarToken": aadhaar_token, "status": "active"})
-        return doc
+        return self.citizens.by_token("aadhaarToken", aadhaar_token)
 
     def send_pickup_otp(self, aadhaar_token, ip) -> str:
         """OTP to the Aadhaar-linked phone of a claim's owner. Returns the masked phone for staff."""
@@ -335,6 +338,7 @@ def ensure_identity_indexes(db) -> None:
         (IDENTITY_SESSIONS, [("purgeAt", 1)], {"expireAfterSeconds": 0}),
         ("mock_uidai", [("aadhaarToken", 1)], {"unique": True}),
         ("mock_uidai", [("vidToken", 1)], {"unique": True}),
+        ("bookings", [("pnrIndex", 1), ("passengerSeq", 1)], {"unique": True}),
     ]
     for name, keys, opts in specs:
         try:

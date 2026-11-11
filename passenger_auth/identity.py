@@ -14,6 +14,10 @@ is turned into a keyed HMAC token (key derived from SIGNING_SECRET) plus the
 last 4 digits for display ("XXXX XXXX 1234"). A plain salted SHA-256 would not
 do: 12 Verhoeff-valid digits are only ~10^11 values, brute-forceable once a
 salt leaks; an HMAC key that never touches the database is not.
+
+Encryption at rest: the mock UIDAI collection keeps only the two tokens in
+clear (they are the lookup keys); name, linked phone, last 4 digits, year of
+birth, gender and status are sealed with AES-256-GCM (stores.CitizenStore).
 """
 import hashlib
 import hmac
@@ -114,13 +118,14 @@ class Citizen:
     gender: str
 
 
-def find_citizen(db, key: bytes, kind: str, digits: str):
+def find_citizen(citizens, key: bytes, kind: str, digits: str):
+    """Look up an active citizen in the encrypted mock UIDAI store."""
     field = "aadhaarToken" if kind == AADHAAR else "vidToken"
-    doc = db[MOCK_UIDAI].find_one({field: id_token(key, kind, digits), "status": "active"})
-    if not doc:
+    rec = citizens.by_token(field, id_token(key, kind, digits))
+    if not rec:
         return None
-    return Citizen(doc["aadhaarToken"], doc["last4"], doc["name"], doc["linkedPhone"],
-                   doc.get("yearOfBirth", 0), doc.get("gender", ""))
+    return Citizen(rec["aadhaarToken"], rec["last4"], rec["name"], rec["linkedPhone"],
+                   rec.get("yearOfBirth", 0), rec.get("gender", ""))
 
 
 # ── seed data ────────────────────────────────────────────────────────────────
@@ -157,33 +162,36 @@ def mock_vid_for(name: str) -> str:
     raise KeyError(name)
 
 
+SEALED_SCHEMA = {"bsonType": "object", "required": ["v", "kid", "ct"],
+                 "properties": {"v": {"enum": [1]}, "kid": {"bsonType": "string"}, "ct": {"bsonType": "string"}}}
+
+# The database itself refuses a clear-text record: only the tokens and the sealed blob may exist.
 MOCK_UIDAI_VALIDATOR = {
     "$jsonSchema": {
         "bsonType": "object",
-        "required": ["aadhaarToken", "vidToken", "last4", "name", "linkedPhone", "status"],
+        "required": ["aadhaarToken", "vidToken", "sealed"],
+        "additionalProperties": False,
         "properties": {
+            "_id":          {},
             "aadhaarToken": {"bsonType": "string"},
             "vidToken":     {"bsonType": "string"},
-            "last4":        {"bsonType": "string", "pattern": "^[0-9]{4}$"},
-            "name":         {"bsonType": "string"},
-            "linkedPhone":  {"bsonType": "string"},
-            "yearOfBirth":  {"bsonType": ["int", "long"]},
-            "gender":       {"enum": ["M", "F", "T"]},
-            "status":       {"enum": ["active", "revoked"]},
+            "sealed":       SEALED_SCHEMA,
         },
     }
 }
 
 
-def seed_mock_uidai(db, signing_secret: str) -> int:
-    """Upsert the mock UIDAI records (tokens + last 4 only). Idempotent."""
+def seed_mock_uidai(db, signing_secret: str, vault=None) -> int:
+    """Upsert the mock UIDAI records, encrypted. Idempotent."""
+    from .stores import CitizenStore
+    from .vault import Vault
     key = token_key(signing_secret)
+    store = CitizenStore(db, vault or Vault.from_env(signing_secret))
+    store.migrate_plaintext()
     for aadhaar, vid, name, yob, gender, phone in MOCK_CITIZENS:
-        db[MOCK_UIDAI].update_one(
-            {"aadhaarToken": id_token(key, AADHAAR, aadhaar)},
-            {"$set": {"vidToken": id_token(key, VID, vid), "last4": aadhaar[-4:], "name": name,
-                      "linkedPhone": phone, "yearOfBirth": yob, "gender": gender, "status": "active"}},
-            upsert=True)
+        store.upsert(id_token(key, AADHAAR, aadhaar), id_token(key, VID, vid),
+                     {"last4": aadhaar[-4:], "name": name, "linkedPhone": phone, "yearOfBirth": yob,
+                      "gender": gender, "status": "active"})
     return len(MOCK_CITIZENS)
 
 

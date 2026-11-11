@@ -142,35 +142,56 @@ The suite runs on an in-memory MongoDB (mongomock), so it needs no database or M
 
 ---
 
-## 🔐 Passenger OTP Authentication (Feature 1)
+## 🔐 Passenger Login: two security layers (Feature 1)
 
 Someone who only knows another passenger's PNR must not be able to open their Lost & Found
-records. Passengers therefore prove they hold the **mobile number registered on the booking**.
+records. Every login therefore passes **two layers, always in this order**. There is no
+single-layer way in.
 
 ### Flow
-1. Passenger opens **Passenger Login** (`/passenger/login`) and enters the PNR and mobile number.
-2. The server normalizes the number (`+91`, spaces, dashes and a leading `0` are all accepted)
-   and checks it against the booking. If they match an eligible booking, a 6-digit OTP is sent
-   **to the registered number only**. The response is the same generic message whether or not
-   the PNR exists.
-3. The passenger enters the OTP within **5 minutes**. Resend is available after **30 s**.
+1. **Layer 1 (Aadhaar / VID).** On **Passenger Login** (`/passenger/login`) the passenger enters
+   a (mock) Aadhaar number or Virtual ID and consents. The number is checked (12 or 16 digits,
+   Verhoeff) and looked up in the **encrypted mock UIDAI database**. A 6-digit OTP goes to the
+   phone linked to that Aadhaar. The reply is the same generic message whether or not the number
+   exists.
+2. The passenger enters the OTP within **5 minutes** and gets a short-lived identity cookie. No
+   Lost & Found data is reachable yet.
+3. **Layer 2 (ticket PNR).** The passenger enters the ticket's PNR. It is looked up in the
+   **encrypted mock PNR database** and accepted only if the booking carries the **same Aadhaar
+   token** and an agreeing name. The booking must also be confirmed and travelled within 90 days.
+   On a group booking the session is bound to that one passenger's seat.
 4. On success a signed, `HttpOnly`/`Secure`/`SameSite=Lax` session cookie is issued (default
-   30 min), and the passenger lands on **My Lost & Found** (`/passenger`).
-5. **Log out** revokes the session on the server. An expired session redirects to the login
-   page with a notice.
+   30 min), and the passenger lands on **My Lost & Found** (`/passenger`). **Log out** revokes
+   both layers.
 
-**Protections.** OTPs come from a CSPRNG and are stored only as a salted HMAC, compared in
-constant time and single use. A new request replaces the previous OTP. **3 wrong attempts
-lock verification for 15 min**, and the correct code is refused while locked. Limits: one
-request per 30 s, 5 per PNR per hour, plus per-IP limits. Cancelled bookings and journeys
-older than 90 days cannot log in.
+**Protections.**
+- OTPs come from a CSPRNG and are stored only as a keyed HMAC, compared in constant time and
+  used once.
+- **3 wrong attempts lock the number for 15 min**, and the right code is refused while locked.
+- Resend cooldowns and per-number and per-IP limits apply.
+- Login errors are generic, so neither layer reveals whether an Aadhaar or PNR exists.
+
+### Both mock databases are encrypted at rest
+`mock_uidai` and `bookings` store only a **blind index** (HMAC-SHA256: `aadhaarToken`/`vidToken`,
+`pnrIndex`) next to an **AES-256-GCM** sealed record (`passenger_auth/vault.py`, `stores.py`):
+- Names, phones, last 4 digits, routes and the PNR itself are never in clear.
+- Each record is bound to its row through GCM associated data, so a ciphertext copied onto
+  another row does not decrypt.
+- MongoDB `$jsonSchema` validators reject any clear-text field.
+- Clear-text rows left from older versions are sealed automatically at startup.
+
+Keys: `DATA_ENCRYPTION_KEYS` (`k1:<base64 32 bytes>,k2:...`), `DATA_ENCRYPTION_KEY_ID` (the key that
+encrypts new writes; older keys still decrypt, for rotation) and `DATA_INDEX_KEY`. If they are
+unset, keys are derived from `SIGNING_SECRET` with a warning, which is fine for development only.
 
 ### API
 
 | Method & path | Body | Success | Errors |
 |---|---|---|---|
-| `POST /auth/otp/request` | `{"pnr", "phone"}` | `202` generic message, `expiresInSeconds`, `resendAfterSeconds` | `400`, `413`, `423` locked, `429` cooldown/limits |
-| `POST /auth/otp/verify` (`?next=/path` optional) | `{"pnr", "phone", "otp"}` | `200` passenger + session, sets cookie | `400`, `401` invalid/expired, `423`, `429` |
+| `POST /auth/id/otp/request` | `{"idNumber", "consent": "yes"}` | `202` generic message | `400`, `413`, `429` cooldown/limits |
+| `POST /auth/id/otp/verify` | `{"idNumber", "otp"}` | `200` masked identity, sets identity cookie | `400`, `401` invalid/expired, `423`, `429` |
+| `POST /auth/id/link` (`?next=/path` optional) | `{"pnr"}` | `200` passenger + session, sets cookie | `400`, `401` layer 1 missing, `404` PNR not under this Aadhaar |
+| `GET /auth/id/me` | none | `200` the verified identity (masked) | `401` |
 | `POST /auth/logout` | none | `200`, cookie cleared, session revoked | none |
 | `GET /auth/me` | none | `200` passenger, booking, session expiry | `401` no/expired/invalid session, `403` booking no longer eligible |
 
@@ -381,7 +402,7 @@ Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" documen
 
 | Feature | Where | What it does |
 |---|---|---|
-| **A. Mock Aadhaar + PNR** | `passenger_auth/identity*.py`, `templates/passenger_login.html` | Log in with a (mock) Aadhaar number or VID + OTP to the linked phone, then link a PNR whose booking carries the **same ID token** and name. Only an HMAC token and the last 4 digits are stored; data is purged 7 days after the case closes. PNR + mobile stays as the fallback (Aadhaar can never be mandatory). |
+| **A. Two-layer login: Aadhaar, then PNR** | `passenger_auth/identity*.py`, `vault.py`, `stores.py`, `templates/passenger_login.html` | Always two layers: (mock) Aadhaar or VID + OTP to the linked phone, then the ticket PNR, whose booking must carry the **same ID token** and name. Both mock databases (UIDAI and PNR) are AES-256-GCM encrypted at rest with blind indexes. Reports keep only an HMAC token and the last 4 digits, purged 7 days after the case closes. |
 | **B. Smart report form** | `index.html`, `static/js/report-form.js`, `photo-input.js`, `vocabulary.py` | Journey filled from the ticket (route, bus, date, boarding stop, seat taken server-side; alighting editable), category, where the item was kept, a match-readiness meter with add-detail chips (English/Tamil/Tanglish), photo dropzone with compression, Tamil voice shown next to its English translation. |
 | **C. Camera scan for depots** | `item_intake/`, `templates/depot_intake.html`, `static/js/intake.js` | "Add new lost item": the webcam or phone camera opens; OpenCV keeps only sharp, well-lit, *new* views (Laplacian variance, exposure, perceptual hash), finds the item (GrabCut), names colours (k-means in Lab + CIEDE2000) and spots text for a close-up. CLIP zero-shot, OCR and offline Florence-2 write the record; it saves automatically. |
 | **D. Ownership questions v2** | `claims/attributes.py`, `item_intake/questions.py` | Only high-confidence facts become questions; multiple choice uses plausible neighbours (closest colours, same-category brands), never opposites; at most two choice questions per round plus free text; new "text on the tag" question. |
@@ -393,7 +414,7 @@ Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" documen
 | Passenger | Mock Aadhaar | PNR | Shows |
 |---|---|---|---|
 | Arun Kumar | 2345 6789 0124 | T26100101 | Aadhaar login → ticket autofill |
-| Priya Raman | 3456 7890 1238 | T26100102 | booked with a driving licence → "use PNR + mobile" |
+| Priya Raman | 3456 7890 1238 | T26100102 | email-only contact; Arun's Aadhaar + her PNR is refused at layer 2 |
 | Meena Senthil | 7890 1234 5674 | T26100105 | group booking → bound to her own seat |
 | Arun Kumar (VID) | 9123 4567 8901 2346 | T26100101 | same person via Virtual ID |
 

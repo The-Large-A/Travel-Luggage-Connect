@@ -32,6 +32,7 @@ from passenger_auth import init_passenger_auth, require_passenger
 from passenger_auth.phone import try_normalize_phone
 from passenger_auth.timeutil import to_db, utcnow, fmt_ist
 from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
+from match_notify.service import seq_visible
 from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
 from claims import encode_private_attributes, new_tag_id
 from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
@@ -594,7 +595,8 @@ def index():
 def booking_rows_for(passenger) -> list:
     """The booking rows this session may report for: same PNR + phone, and only
     the verified passenger when the session came from an Aadhaar login."""
-    rows = [r for r in db.bookings.find({"pnr": passenger.pnr}).sort("passengerSeq", 1)
+    store = app.extensions["passenger_auth"].bookings          # encrypted mock PNR database
+    rows = [r for r in store.rows(passenger.pnr)
             if try_normalize_phone(r.get("registeredPhone")) == passenger.phone]
     if passenger.passenger_seqs:
         rows = [r for r in rows if r.get("passengerSeq") in passenger.passenger_seqs]
@@ -1061,8 +1063,8 @@ def _owned_report(tracking_id: str, passenger):
     report = lost_collection.find_one({"tracking_id": (tracking_id or "").strip().upper()})
     if not report or report.get("ownerPnr") != passenger.pnr or report.get("ownerPhone") != passenger.phone:
         return None
-    if passenger.passenger_seqs and report.get("passengerSeq") not in passenger.passenger_seqs:
-        return None                                  # Aadhaar session: only this passenger's own reports
+    if not seq_visible(report.get("passengerSeq"), passenger):
+        return None                                  # group booking: only this passenger's own reports
     return report
 
 

@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from bson import ObjectId
 
-from conftest import (ARUN, DEPOT_A, DEPOT_B, KARTHIK, MULTI_RAVI, MULTI_SHARED, PRIYA, F2, make_f2_config,
+from conftest import (TEST_SECRET, ARUN, DEPOT_A, DEPOT_B, KARTHIK, MULTI_RAVI, MULTI_SHARED, PRIYA, F2, make_f2_config,
                       score_of)
 from match_notify.channels import EMAIL, WHATSAPP
 from passenger_auth.timeutil import from_db
@@ -600,7 +600,7 @@ def test_seed_matches_covers_scenarios_and_is_idempotent(db, clock, sms):
     from match_notify import ensure_match_indexes
     from seed_matches import seed_matches
     ensure_match_indexes(db)
-    first = seed_matches(db, now=clock())
+    first = seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
     status = {db.lost_reports.find_one({"request_id": m["reportId"]})["tracking_id"]: m["status"]
               for m in db.matches.find()}
     assert status == {"TRK-DEMO0001": "notified", "TRK-DEMO0002": "notified",
@@ -612,5 +612,50 @@ def test_seed_matches_covers_scenarios_and_is_idempotent(db, clock, sms):
     assert channels[("demo-trk-demo0002", "email")] == "sent"                      # email-only passenger
     assert channels[("demo-trk-demo0007", "whatsapp")] == "failed"                 # no channel at all
     messages = db.message_log.count_documents({})
-    seed_matches(db, now=clock())
+    seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
     assert db.matches.count_documents({}) == 7 and db.message_log.count_documents({}) == messages
+
+
+# ── Group bookings: one PNR, one shared phone, two passengers ────────────────
+def _login_as(f2, name, pnr):
+    from conftest import AuthFlow
+    from passenger_auth.identity import mock_number_for
+    client = f2.app.test_client()
+    flow = AuthFlow(client, f2.sms, f2.clock)
+    flow.verify_identity(mock_number_for(name))
+    assert flow.link(pnr).status_code == 200
+    return client
+
+
+def test_shared_phone_passengers_cannot_see_each_others_match(f2):
+    # Senthil (seq 1) and Meena (seq 2) are on T26100105 with the SAME phone.
+    lost = f2.lost(MULTI_SHARED)
+    assert lost["passengerSeq"] == 1
+    match, _ = f2.match(lost, f2.found(), 0.9)
+    senthil = _login_as(f2, "Senthil Kumar", "T26100105")
+    meena = _login_as(f2, "Meena Senthil", "T26100105")
+    assert senthil.get(f"/matches/{match['_id']}").status_code == 200
+    assert meena.get(f"/matches/{match['_id']}").status_code == 404           # same PNR + phone, other person
+    assert meena.get("/notifications").get_json()["notifications"] == []
+    assert meena.get("/reports").get_json()["reports"] == []
+    assert len(senthil.get("/notifications").get_json()["notifications"]) == 1
+
+
+def test_reports_from_the_single_layer_era_are_stamped_with_their_owner(f2):
+    from match_notify.service import backfill_passenger_seqs
+    bookings = f2.app.extensions["passenger_auth"].bookings
+    shared = f2.lost(MULTI_SHARED, tracking="TRK-LEG00001", owned=False,
+                     ownerPnr="T26100105", ownerPhone="+919123456780")
+    ravi = f2.lost(MULTI_RAVI, tracking="TRK-LEG00002", owned=False,
+                   ownerPnr="T26100105", ownerPhone="+918098765432")
+    stranger = f2.lost(MULTI_RAVI, tracking="TRK-LEG00003", owned=False,
+                       ownerPnr="T26100105", ownerPhone="+919999999999")       # phone not on the PNR
+    f2.db.claims.insert_one({"claimId": "legacy-claim", "reportId": ravi["request_id"]})
+    assert backfill_passenger_seqs(f2.db, bookings) == 3
+    seq = {d["tracking_id"]: d.get("passengerSeq") for d in f2.db.lost_reports.find()}
+    assert seq["TRK-LEG00001"] == 1          # shared phone → the booker (lowest seq)
+    assert seq["TRK-LEG00002"] == 3          # Ravi's own phone → Ravi, not the booker
+    assert seq["TRK-LEG00003"] is None       # nobody on the PNR has that phone: stays invisible
+    assert f2.db.claims.find_one({"claimId": "legacy-claim"})["passengerSeq"] == 3
+    assert backfill_passenger_seqs(f2.db, bookings) == 0                       # idempotent
+    assert shared and stranger

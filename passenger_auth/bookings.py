@@ -1,9 +1,11 @@
 """
 Booking (PNR) lookup and the eligibility policy for Lost & Found access.
 
-Collection `bookings` holds one document per passenger on a PNR:
-    pnr, passengerSeq, passengerName, registeredPhone (E.164), status,
-    route, routeId, travelDate ("YYYY-MM-DD", IST calendar date)
+The mock TNSTC PNR database (collection `bookings`) holds one ENCRYPTED
+document per passenger on a PNR (see stores.BookingStore): only a keyed index of
+the PNR and the passenger number are in clear; passengerName, registeredPhone
+(E.164), status, route, travelDate ("YYYY-MM-DD", IST), idProof and the journey
+links are sealed with AES-256-GCM.
 
 A multi-passenger PNR is several documents sharing `pnr`. A typed phone is
 matched against every passenger's registeredPhone on that PNR; the session is
@@ -68,13 +70,14 @@ def is_eligible(doc: dict, today: date, window_days: int) -> bool:
     return travel is not None and travel >= today - timedelta(days=window_days)
 
 
-def find_eligible_booking(db, pnr: str, phone: str, today: date, window_days: int):
+def find_eligible_booking(bookings, pnr: str, phone: str, today: date, window_days: int):
     """
     Return a BookingMatch when `phone` is the registered phone of at least one
-    eligible passenger on `pnr`; otherwise None. Callers must NOT tell the
-    client which of (unknown PNR / wrong phone / ineligible) happened.
+    eligible passenger on `pnr`; otherwise None. `bookings` is the encrypted
+    BookingStore. Callers must NOT tell the client which of (unknown PNR /
+    wrong phone / ineligible) happened.
     """
-    docs = [d for d in db[BOOKINGS].find({"pnr": pnr}).sort("passengerSeq", 1)
+    docs = [d for d in bookings.rows(pnr)
             if try_normalize_phone(d.get("registeredPhone")) == phone
             and is_eligible(d, today, window_days)]
     if not docs:

@@ -16,7 +16,7 @@ import pytest
 from pymongo import MongoClient
 
 from claims import txn
-from conftest import F3, FakeClock, RecordingSmsProvider
+from conftest import F3, TEST_SECRET, FakeClock, RecordingSmsProvider
 
 URI = os.environ.get("LOCAL_MONGO_URI")
 pytestmark = pytest.mark.skipif(not URI, reason="set LOCAL_MONGO_URI to a replica-set MongoDB to run")
@@ -38,7 +38,7 @@ def real_db():
 def f3_real(real_db, tmp_path):
     from seed_bookings import seed_bookings
     clock = FakeClock()
-    seed_bookings(real_db, now=clock())
+    seed_bookings(real_db, now=clock(), signing_secret=TEST_SECRET)
     return F3(real_db, clock, RecordingSmsProvider(), tmp_path)
 
 

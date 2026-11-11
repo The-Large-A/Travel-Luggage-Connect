@@ -92,7 +92,7 @@
                     {% else %}
                     <div id="login-required" class="p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
                         <p class="font-bold">Please log in to report a lost item.</p>
-                        <p class="text-xs mt-1">Verify with your Aadhaar / VID (then your ticket's PNR), or with your PNR and mobile number. Only you will see your report and its matches.</p>
+                        <p class="text-xs mt-1">Two security layers: verify your Aadhaar / VID, then your ticket's PNR. Only you will see your report and its matches.</p>
                         <a href="{{ url_for('passenger_auth.login_page', next='/') }}" class="inline-block mt-3 btn-gov-primary text-xs uppercase tracking-widest">Passenger Login</a>
                     </div>
                     {% endif %}

@@ -27,7 +27,6 @@ from bson.errors import InvalidId
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from passenger_auth.bookings import BOOKINGS
 from passenger_auth.phone import try_normalize_phone
 from passenger_auth.timeutil import fmt_ist, from_db, iso_utc, seconds_until, to_db
 
@@ -77,9 +76,54 @@ def item_is_available(found) -> bool:
     return bool(found) and found.get("status") in AVAILABLE_ITEM_STATUSES
 
 
+# Group bookings share one PNR and often one phone, so PNR + phone cannot tell
+# passengers apart: every passenger-owned record also carries the passengerSeq
+# the two-layer login resolved, and access is checked against it. Records from
+# before that existed are stamped once at startup (backfill_passenger_seqs).
+def _session_seqs(passenger) -> list:
+    return [int(s) for s in (getattr(passenger, "passenger_seqs", ()) or ())]
+
+
+def seq_visible(record_seq, passenger) -> bool:
+    seqs = _session_seqs(passenger)
+    return not seqs or record_seq in seqs
+
+
+def seq_query(passenger, field="passengerSeq") -> dict:
+    seqs = _session_seqs(passenger)
+    return {field: {"$in": seqs}} if seqs else {}
+
+
+def backfill_passenger_seqs(db, bookings) -> int:
+    """
+    Stamp passengerSeq on owned reports and claims written by the old single-layer
+    login. The owner is the passenger on that PNR whose registered phone made the
+    report; if several share the phone (a family booking), the lowest seq (the
+    booker) gets it, which is the most restrictive choice that keeps it visible.
+    """
+    if bookings is None:
+        return 0
+    from passenger_auth.phone import try_normalize_phone
+    n = 0
+    for lost in list(db[LOST].find({"ownerPnr": {"$nin": [None, ""]}, "passengerSeq": None},
+                                   {"ownerPnr": 1, "ownerPhone": 1})):
+        seqs = sorted(int(r["passengerSeq"]) for r in bookings.rows(lost["ownerPnr"])
+                      if try_normalize_phone(r.get("registeredPhone")) == lost.get("ownerPhone"))
+        if seqs:
+            db[LOST].update_one({"_id": lost["_id"]}, {"$set": {"passengerSeq": seqs[0]}})
+            n += 1
+    for claim in list(db["claims"].find({"passengerSeq": None}, {"reportId": 1})):
+        lost = db[LOST].find_one({"request_id": claim.get("reportId")}, {"passengerSeq": 1}) or {}
+        if lost.get("passengerSeq") is not None:
+            db["claims"].update_one({"_id": claim["_id"]}, {"$set": {"passengerSeq": lost["passengerSeq"]}})
+            n += 1
+    return n
+
+
 class MatchNotifyService:
-    def __init__(self, db, config, channels, clock, rematch_lost=None, rematch_found=None):
+    def __init__(self, db, config, channels, clock, rematch_lost=None, rematch_found=None, bookings=None):
         self.db = db
+        self.bookings = bookings            # encrypted mock PNR database (passenger_auth.stores.BookingStore)
         self.config = config
         self.channels = channels
         self.clock = clock
@@ -212,7 +256,9 @@ class MatchNotifyService:
         """Verified contact points for the report owner, read from their booking."""
         if not lost or not lost.get("ownerPnr") or not lost.get("ownerPhone"):
             return {}
-        rows = [b for b in self.db[BOOKINGS].find({"pnr": lost["ownerPnr"]})
+        if self.bookings is None:
+            return {}
+        rows = [b for b in self.bookings.rows(lost["ownerPnr"])
                 if try_normalize_phone(b.get("registeredPhone")) == lost["ownerPhone"]]
         out = {}
         if rows and any(b.get("whatsapp", True) for b in rows):
@@ -487,12 +533,8 @@ class MatchNotifyService:
 
     @staticmethod
     def _owner_query(passenger):
-        """PNR + phone; an Aadhaar session is narrowed to its own passenger on a group booking."""
-        query = {"ownerPnr": passenger.pnr, "ownerPhone": passenger.phone}
-        seqs = list(getattr(passenger, "passenger_seqs", ()) or ())
-        if seqs:
-            query["passengerSeq"] = {"$in": seqs}
-        return query
+        """PNR + phone, narrowed to the logged-in passenger on a group booking."""
+        return {"ownerPnr": passenger.pnr, "ownerPhone": passenger.phone, **seq_query(passenger)}
 
     def reports_for(self, passenger):
         return list(self.lost.find(self._owner_query(passenger)).sort("created_at", -1))
@@ -506,8 +548,7 @@ class MatchNotifyService:
         match = self.matches.find_one({"_id": oid, "approvedAt": {"$exists": True}}) if oid else None
         if not match:
             raise NotFound()
-        lost = self.lost.find_one({"request_id": match["reportId"], "ownerPnr": passenger.pnr,
-                                   "ownerPhone": passenger.phone})
+        lost = self.lost.find_one({"request_id": match["reportId"], **self._owner_query(passenger)})
         if not lost:
             raise NotFound()
         return match, lost

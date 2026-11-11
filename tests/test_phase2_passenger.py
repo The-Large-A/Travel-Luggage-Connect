@@ -17,6 +17,11 @@ from seed_bookings import seed_bookings
 SECRET = ENV["SIGNING_SECRET"]
 
 
+def set_booking(app_module, pnr, fields, seq=None):
+    """Bookings are encrypted at rest, so tests edit them through the store (never in clear)."""
+    assert app_module.app.extensions["passenger_auth"].bookings.update(pnr, fields, seq=seq)
+
+
 @pytest.fixture
 def p2(e2e):
     app_module, db, sms = e2e
@@ -25,9 +30,9 @@ def p2(e2e):
     seed_bookings(db, signing_secret=SECRET)
     seed_mock_uidai(db, SECRET)
     # Arun's ticket: route R100, trip T1, Chennai (S1) → Villupuram (S2), seat 12.
-    db.bookings.update_one({"pnr": ARUN["pnr"]}, {"$set": {
+    set_booking(app_module, ARUN["pnr"], {
         "routeId": "R100", "tripId": "T1", "boardingStopId": "S1", "alightingStopId": "S2", "seatNo": 12,
-        "travelDate": _today()}})
+        "travelDate": _today()})
     db.depots.update_one({"name": "Salem Depot"}, {"$set": {"publicPhone": "+91 44 2400 1234",
                                                              "whatsapp": "+91 94450 12345", "lat": 11.6, "lon": 78.1}})
     yield app_module, db, sms
@@ -83,7 +88,7 @@ def test_ticket_fields_cannot_be_tampered_with(p2):
 
 def test_ticket_without_a_seat_lets_the_passenger_pick_one(p2):
     app_module, db, sms = p2
-    db.bookings.update_one({"pnr": ARUN["pnr"]}, {"$set": {"seatNo": None}})
+    set_booking(app_module, ARUN["pnr"], {"seatNo": None})
     client = _login(app_module.app.test_client(), sms, ARUN)
     report(client, seat_no="21")
     lost = db.lost_reports.find_one({})
@@ -93,9 +98,9 @@ def test_ticket_without_a_seat_lets_the_passenger_pick_one(p2):
 def test_group_booking_aadhaar_session_sees_only_its_own_reports(p2):
     app_module, db, sms = p2
     for seq, name in ((1, "Senthil Kumar"), (2, "Meena Senthil")):
-        db.bookings.update_one({"pnr": "T26100105", "passengerSeq": seq}, {"$set": {
+        set_booking(app_module, "T26100105", {
             "routeId": "R100", "tripId": "T1", "boardingStopId": "S1", "alightingStopId": "S2",
-            "seatNo": 10 + seq, "travelDate": _today()}})
+            "seatNo": 10 + seq, "travelDate": _today()}, seq=seq)
     senthil = aadhaar_login(app_module.app.test_client(), sms, "Senthil Kumar", "T26100105")
     report(senthil, description="Senthil's brown leather wallet")
     tracking = db.lost_reports.find_one({"passengerSeq": 1})["tracking_id"]
@@ -107,7 +112,7 @@ def test_group_booking_aadhaar_session_sees_only_its_own_reports(p2):
 
 def test_alighting_before_boarding_is_refused_for_a_ticket(p2):
     app_module, db, sms = p2
-    db.bookings.update_one({"pnr": ARUN["pnr"]}, {"$set": {"boardingStopId": "S2", "alightingStopId": "S3"}})
+    set_booking(app_module, ARUN["pnr"], {"boardingStopId": "S2", "alightingStopId": "S3"})
     client = _login(app_module.app.test_client(), sms, ARUN)
     report(client, alighting_stop_id="S1")
     assert db.lost_reports.count_documents({}) == 0
@@ -122,7 +127,9 @@ def test_report_details_are_stored(p2):
     assert lost["category"] == "bag" and lost["storageLocation"] == "boot"
     assert lost["descriptionOriginal"] == "நீல பை" and lost["descriptionLang"] == "ta"
     assert lost["detailScore"] == 100 and lost["ticketType"] == "pnr"
-    assert lost["ownerIdentity"] is None                    # PNR login: no identity data at all
+    ident = lost["ownerIdentity"]                           # two-layer login: token + last 4 only
+    assert set(ident) == {"type", "token", "last4"} and ident["type"] == "aadhaar"
+    assert mock_number_for("Arun Kumar") not in repr(lost) and lost["passengerSeq"] == 1
 
 
 def test_unknown_category_and_storage_are_normalised(p2):

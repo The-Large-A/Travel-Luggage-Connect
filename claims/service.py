@@ -25,7 +25,7 @@ from bson.errors import InvalidId
 from pymongo.errors import DuplicateKeyError
 
 from match_notify.service import (AUTO_APPROVED, CLAIM_STARTED, NOTIFIED, RELEASED, RESOLVED,
-                                  NotFound as MatchNotFound)
+                                  NotFound as MatchNotFound, seq_query)
 from match_notify.template import format_found_date, public_item_description
 from passenger_auth.errors import AuthError
 from passenger_auth.otp import derive_key
@@ -110,13 +110,13 @@ class ClaimsService:
         if not isinstance(claim_id, str) or len(claim_id) > 64:
             raise NotFound()
         claim = self.claims.find_one({"claimId": claim_id, "pnr": passenger.pnr,
-                                      "claimerPhone": passenger.phone})
+                                      "claimerPhone": passenger.phone, **seq_query(passenger)})
         if not claim:
             raise NotFound()
         return self._expire_if_due(claim)
 
     def claims_for_passenger(self, passenger, match_id=None):
-        query = {"pnr": passenger.pnr, "claimerPhone": passenger.phone}
+        query = {"pnr": passenger.pnr, "claimerPhone": passenger.phone, **seq_query(passenger)}
         if isinstance(match_id, str):
             query["matchId"] = match_id
         return [self._expire_if_due(c) for c in self.claims.find(query).sort("createdAt", -1)]
@@ -150,7 +150,8 @@ class ClaimsService:
         claim = {
             "claimId": uuid.uuid4().hex, "matchId": str(match["_id"]), "reportId": match["reportId"],
             "itemId": match["itemId"], "pnr": passenger.pnr, "claimerName": passenger.passenger_name,
-            "claimerPhone": passenger.phone, "depotId": item.get("depot_phone"),
+            "claimerPhone": passenger.phone, "passengerSeq": lost.get("passengerSeq"),
+            "depotId": item.get("depot_phone"),
             "status": sm.OPENED, "openForMatch": True, "questionSet": [], "pendingQuestions": [],
             "reserveQuestion": None, "extraAsked": False, "roundsUsed": 0, "answerSeq": 0,
             "outcomePerQuestion": [], "trustScore": None, "tokenHash": None, "tokenExpiresAt": None,
@@ -602,8 +603,11 @@ class ClaimsService:
             claim, item, _ = self._check_pickup(token, depot_phone, tag)
         except TokenError as e:
             return {"valid": False, "reason": e.reason, "message": PICKUP_REASONS.get(e.reason, e.reason)}
-        return {"valid": True, "reason": "ok", "message": "Valid pickup code. Check photo ID, then confirm.",
-                "claim": self.pickup_summary(claim, item)}
+        summary = self.pickup_summary(claim, item)
+        step = ("re-check their Aadhaar (last 4 digits + OTP)" if summary["identityCheck"] == "aadhaar_otp"
+                else "check photo ID")
+        return {"valid": True, "reason": "ok", "message": f"Valid pickup code. Now {step}, then confirm.",
+                "claim": summary}
 
     def complete_pickup(self, token, depot_phone, tag, id_checked, staff_name=None, id_last4=None, id_otp=None):
         try:

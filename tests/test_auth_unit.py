@@ -13,8 +13,11 @@ from passenger_auth.errors import AuthError
 from passenger_auth.otp import (derive_key, generate_otp, hash_otp, is_valid_otp_format,
                                 new_salt, otp_matches)
 from passenger_auth.phone import PhoneFormatError, mask_phone, normalize_phone
+from passenger_auth.identity import mock_number_for
+from passenger_auth.identity_service import IdentityService
 from passenger_auth.ratelimit import RateLimiter
-from passenger_auth.service import OtpService
+from passenger_auth.stores import BookingStore, CitizenStore
+from passenger_auth.vault import Vault
 from passenger_auth.sms import MockSmsProvider, TwilioSmsProvider, build_sms_provider
 from passenger_auth.timeutil import IST, fmt_ist, from_db, iso_utc, seconds_until, to_db, today_ist
 
@@ -136,75 +139,79 @@ def test_seconds_until_rounds_up_and_floors_at_zero(clock):
     assert seconds_until(now - timedelta(seconds=5), now) == 0
 
 
-# ── Service-level expiry and attempt counting ────────────────────────────────
+# ── Service-level expiry and attempt counting (layer 1: Aadhaar OTP) ──────────
+ARUN_NO = mock_number_for("Arun Kumar")
+
+
 def _service(db, clock, sms, **cfg):
     config = make_config(**cfg)
-    return OtpService(db, config, sms, RateLimiter(db, clock), clock)
+    vault = Vault.from_env(config.signing_secret)
+    return IdentityService(db, config, sms, RateLimiter(db, clock), clock,
+                           CitizenStore(db, vault), BookingStore(db, vault))
 
 
 def test_otp_expiry_boundary(db, clock, sms):
     svc = _service(db, clock, sms)
-    svc.request_otp("T26100101", "9876543210", "1.1.1.1")
+    svc.request_login_otp(ARUN_NO, "yes", "1.1.1.1")
     otp = sms.last_otp()
     clock.advance(299)
-    assert svc.verify_otp("T26100101", "9876543210", otp, "1.1.1.1").pnr == "T26100101"
+    citizen, _kind = svc.verify_login_otp(ARUN_NO, otp, "1.1.1.1")
+    assert citizen.name == "Arun Kumar"
 
     clock.advance(31)
-    svc.request_otp("T26100101", "9876543210", "1.1.1.1")
+    svc.request_login_otp(ARUN_NO, "yes", "1.1.1.1")
     otp = sms.last_otp()
     clock.advance(300)                       # exactly at expiresAt → expired (exclusive bound)
     with pytest.raises(AuthError) as e:
-        svc.verify_otp("T26100101", "9876543210", otp, "1.1.1.1")
-    assert e.value.code == "otp_expired"
+        svc.verify_login_otp(ARUN_NO, otp, "1.1.1.1")
+    assert e.value.code == "otp_invalid"     # login never reveals the reason (no enumeration)
 
 
 def test_attempts_are_counted_and_lock_at_max(db, clock, sms):
     svc = _service(db, clock, sms)
-    svc.request_otp("T26100101", "9876543210", "1.1.1.1")
-    bad = wrong_otp(sms.last_otp())
-    remaining = []
-    for _ in range(2):
+    svc.request_login_otp(ARUN_NO, "yes", "1.1.1.1")
+    good = sms.last_otp()
+    bad = wrong_otp(good)
+    for _ in range(3):
         with pytest.raises(AuthError) as e:
-            svc.verify_otp("T26100101", "9876543210", bad, "1.1.1.1")
-        remaining.append(e.value.extra["attemptsRemaining"])
-    assert remaining == [2, 1]
-    with pytest.raises(AuthError) as e:
-        svc.verify_otp("T26100101", "9876543210", bad, "1.1.1.1")
-    assert e.value.status == 423
-    doc = db.otp_sessions.find_one({"pnr": "T26100101"})
+            svc.verify_login_otp(ARUN_NO, bad, "1.1.1.1")
+        assert e.value.status == 401 and "attemptsRemaining" not in e.value.extra
+    doc = db.identity_otps.find_one({"purpose": "login"})
     assert doc["attempts"] == 3 and doc["status"] == "locked"
     assert from_db(doc["cooldownUntil"]) == clock() + timedelta(minutes=15)
+    with pytest.raises(AuthError):                                       # even the right code, while locked
+        svc.verify_login_otp(ARUN_NO, good, "1.1.1.1")
 
 
 def test_otp_record_never_stores_raw_code(db, clock, sms):
     svc = _service(db, clock, sms)
-    svc.request_otp("T26100101", "9876543210", "1.1.1.1")
+    svc.request_login_otp(ARUN_NO, "yes", "1.1.1.1")
     otp = sms.last_otp()
-    doc = db.otp_sessions.find_one({"pnr": "T26100101"})
-    assert otp not in str(doc)
-    expected = {"pnr", "phone", "otpHash", "createdAt", "expiresAt", "attempts", "status",
-                "cooldownUntil", "consumedAt", "resendCount", "ip"}
-    assert expected <= set(doc)
+    doc = db.identity_otps.find_one({"purpose": "login"})
+    assert otp not in str(doc) and ARUN_NO not in str(doc)
+    assert {"subject", "phone", "otpHash", "createdAt", "expiresAt", "attempts", "status"} <= set(doc)
     assert from_db(doc["expiresAt"]) - from_db(doc["createdAt"]) == timedelta(seconds=300)
 
 
-def test_raw_otp_never_logged(db, clock, sms, caplog):
+def test_raw_otp_and_ids_never_logged(db, clock, sms, caplog):
     caplog.set_level(logging.DEBUG)
     svc = _service(db, clock, sms)
-    svc.request_otp("T26100101", "9876543210", "1.1.1.1")
+    svc.request_login_otp(ARUN_NO, "yes", "1.1.1.1")
     otp = sms.last_otp()
-    svc.verify_otp("T26100101", "9876543210", otp, "1.1.1.1")
-    assert otp not in caplog.text
+    svc.verify_login_otp(ARUN_NO, otp, "1.1.1.1")
+    assert otp not in caplog.text and ARUN_NO not in caplog.text
     assert "9876543210" not in caplog.text          # phones are masked in logs
 
 
-# ── Booking policy ───────────────────────────────────────────────────────────
+# ── Booking policy (layer 2 reads the encrypted PNR store) ────────────────────
 def test_booking_policy(db, clock):
     today = today_ist(clock())
-    assert find_eligible_booking(db, "T26100101", "+919876543210", today, 90)
-    assert find_eligible_booking(db, "T26100104", "+919003312345", today, 90) is None   # cancelled
-    assert find_eligible_booking(db, "T26100106", "+917010203040", today, 90) is None   # 120 days ago
-    assert find_eligible_booking(db, "T26100106", "+917010203040", today, 150)          # window is config
+    store = BookingStore(db, Vault.from_env(TEST_SECRET))
+    assert find_eligible_booking(store, "T26100101", "+919876543210", today, 90)
+    assert find_eligible_booking(store, "T26100104", "+919003312345", today, 90) is None   # cancelled
+    assert find_eligible_booking(store, "T26100106", "+917010203040", today, 90) is None   # 120 days ago
+    assert find_eligible_booking(store, "T26100106", "+917010203040", today, 150)          # window is config
+    assert find_eligible_booking(store, "T26100101", "+919999999999", today, 90) is None   # not their phone
 
 
 # ── Config ───────────────────────────────────────────────────────────────────
@@ -301,20 +308,25 @@ def test_cooldown_gate(db, clock):
 # ── Seed data and record cleanup ─────────────────────────────────────────────
 def test_seed_is_idempotent_and_covers_policy_cases(db, clock):
     from seed_bookings import seed_bookings
-    seed_bookings(db, now=clock())
-    assert db.bookings.count_documents({}) == 8
-    assert db.bookings.count_documents({"pnr": "T26100105"}) == 3
-    assert db.bookings.count_documents({"status": "cancelled"}) == 1
-    assert len(db.bookings.distinct("pnr")) == 6
-    assert all(d["registeredPhone"].startswith("+91") for d in db.bookings.find())
+    seed_bookings(db, now=clock(), signing_secret=TEST_SECRET)          # second run: no duplicates
+    store = BookingStore(db, Vault.from_env(TEST_SECRET))
+    rows = store.all_rows()
+    assert db.bookings.count_documents({}) == 8 and len(rows) == 8
+    assert len(store.rows("T26100105")) == 3
+    assert sum(r["status"] == "cancelled" for r in rows) == 1
+    assert len({r["pnr"] for r in rows}) == 6
+    assert all(r["registeredPhone"].startswith("+91") for r in rows)
+    assert all(r["idProof"]["type"] == "aadhaar" for r in rows)       # everyone can pass both layers
 
 
 def test_ttl_cleanup_indexes_exist(app, db):
-    for name in ("otp_sessions", "passenger_sessions", "rate_limits", "rate_limit_events", "sms_log"):
+    for name in ("identity_otps", "identity_sessions", "passenger_sessions", "rate_limits",
+                 "rate_limit_events", "sms_log"):
         ttl = [ix for ix in db[name].index_information().values() if "expireAfterSeconds" in ix]
         assert ttl and ttl[0]["key"] == [("purgeAt", 1)] and ttl[0]["expireAfterSeconds"] == 0, name
     unique = db.bookings.index_information()
-    assert any(ix.get("unique") and ix["key"] == [("pnr", 1), ("passengerSeq", 1)] for ix in unique.values())
+    assert any(ix.get("unique") and ix["key"] == [("pnrIndex", 1), ("passengerSeq", 1)] for ix in unique.values())
+    assert not any(ix["key"] == [("pnr", 1), ("passengerSeq", 1)] for ix in unique.values())
 
 
 # ── textbee SMS adapter (demo provider: an Android phone's SIM) ───────────────
@@ -420,13 +432,13 @@ def test_textbee_config_errors(db, env):
 
 
 def test_textbee_end_to_end_through_otp_request(db, clock):
-    """POST /auth/otp/request with SMS_PROVIDER=textbee reaches the phone gateway with the OTP."""
+    """POST /auth/id/otp/request with SMS_PROVIDER=textbee reaches the phone gateway with the OTP."""
     from conftest import build_app, make_config
     from passenger_auth.sms import TextbeeSmsProvider
     session = _TextbeeSession(_TextbeeResponse(200, {"data": {"success": True, "smsBatchId": "b1"}}))
     provider = TextbeeSmsProvider("k", session=session, async_send=False)
     client = build_app(db, clock, provider, make_config()).test_client()
-    assert client.post("/auth/otp/request", json={"pnr": "T26100101", "phone": "98765 43210"}).status_code == 202
+    assert client.post("/auth/id/otp/request", json={"idNumber": ARUN_NO, "consent": "yes"}).status_code == 202
     (_, kw), = session.calls
     assert kw["json"]["recipients"] == ["+919876543210"]
     assert re.match(r"^\d{6} is your TNSTC Lost & Found verification code", kw["json"]["message"])

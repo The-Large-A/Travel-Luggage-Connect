@@ -1,17 +1,16 @@
 """
 Flask blueprint: the /auth API, the passenger pages, and `require_passenger`.
 
-    POST /auth/otp/request   {pnr, phone}       → 202 generic (never reveals PNR existence)
-    POST /auth/otp/verify    {pnr, phone, otp}  → 200 + session cookie
     POST /auth/logout                           → 200, session revoked, cookie cleared
     GET  /auth/me                               → 200 current passenger (requires session)
     GET  /passenger/login                       → login + OTP screens
     GET  /passenger                             → passenger Lost & Found home (requires session)
 
-  Phase 2 — mock Aadhaar / VID login, then the PNR as proof of journey:
-    POST /auth/id/otp/request {idNumber, consent:"yes"} → 202 generic
+  Login is ALWAYS two layers (there is no PNR-only or Aadhaar-only login):
+    POST /auth/id/otp/request {idNumber, consent:"yes"} → 202 generic          (layer 1: Aadhaar)
     POST /auth/id/otp/verify  {idNumber, otp}           → 200 + identity cookie
-    POST /auth/id/link        {pnr}                     → 200 + passenger session (same person only)
+    POST /auth/id/link        {pnr}                     → 200 + passenger session (layer 2: PNR,
+                                                          same person only)
     GET  /auth/id/me                                    → 200 current identity (masked)
 """
 import functools
@@ -26,7 +25,6 @@ from .errors import AuthError
 from .identity import mask_id
 from .identity_service import GENERIC_ID_MESSAGE, ID_COOKIE
 from .phone import mask_phone
-from .service import GENERIC_REQUEST_MESSAGE
 from .sessions import COOKIE_NAME, SessionError
 from .timeutil import fmt_ist, iso_utc, seconds_until, today_ist
 from .validation import read_json_object
@@ -35,7 +33,7 @@ bp = Blueprint("passenger_auth", __name__)
 
 FIELD_LIMITS = {"pnr": 32, "phone": 32, "otp": 16}
 SESSION_MESSAGES = {
-    "missing": ("session_missing", "Please log in with your PNR and mobile number."),
+    "missing": ("session_missing", "Please log in with your Aadhaar and then your ticket's PNR."),
     "invalid": ("session_invalid", "Your session is not valid. Please log in again."),
     "expired": ("session_expired", "Your session has expired. Please log in again."),
     "revoked": ("session_expired", "You have been logged out. Please log in again."),
@@ -110,7 +108,7 @@ def authenticate_request():
     """
     state = _state()
     passenger = state.sessions.load(request.cookies.get(COOKIE_NAME))
-    booking = find_eligible_booking(state.db, passenger.pnr, passenger.phone,
+    booking = find_eligible_booking(state.bookings, passenger.pnr, passenger.phone,
                                     today_ist(state.clock()), state.config.booking_access_window_days)
     if booking is None:
         state.sessions.revoke(passenger.session_id)
@@ -168,29 +166,6 @@ def current_passenger():
 
 
 # ── API ──────────────────────────────────────────────────────────────────────
-@bp.route("/auth/otp/request", methods=["POST"])
-def otp_request():
-    body = read_json_object(request, {"pnr": FIELD_LIMITS["pnr"], "phone": FIELD_LIMITS["phone"]})
-    result = _state().otp.request_otp(body["pnr"], body["phone"], _client_ip())
-    return _json({"ok": True, "message": GENERIC_REQUEST_MESSAGE,
-                  "maskedPhone": result.masked_phone,
-                  "expiresInSeconds": result.expires_in,
-                  "resendAfterSeconds": result.resend_after}, 202)
-
-
-@bp.route("/auth/otp/verify", methods=["POST"])
-def otp_verify():
-    body = read_json_object(request, FIELD_LIMITS)
-    state = _state()
-    booking = state.otp.verify_otp(body["pnr"], body["phone"], body["otp"], _client_ip())
-    token, passenger = state.sessions.issue(booking, _client_ip(), request.headers.get("User-Agent", ""))
-    payload = _passenger_json(passenger, booking)
-    payload["redirect"] = _safe_next(request.args.get("next"))
-    resp = _json(payload, 200)
-    state.sessions.set_cookie(resp, token)
-    return resp
-
-
 @bp.route("/auth/logout", methods=["POST"])
 def logout():
     state = _state()
@@ -290,7 +265,6 @@ def login_page():
     return render_template(
         "passenger_login.html",
         identity=_identity_json(identity) if identity else None,
-        mode=request.args.get("mode", "aadhaar"),
         reason=request.args.get("reason", ""),
         next_url=_safe_next(request.args.get("next")),
         otp_ttl_seconds=state.config.otp_ttl_seconds,

@@ -1,7 +1,8 @@
 """
-Feature 1 — OTP-based passenger authentication (PNR + registered mobile).
-Phase 2 adds mock Aadhaar / VID login with the PNR as proof of journey
-(identity.py, identity_service.py); PNR + mobile stays as the fallback.
+Passenger authentication — two layers, always: (1) Aadhaar / VID + OTP against
+the encrypted mock UIDAI database, then (2) the ticket's PNR against the
+encrypted mock TNSTC PNR database, bound to the same identity
+(identity.py, identity_service.py, stores.py, vault.py).
 
 Wire into the app with:
 
@@ -23,14 +24,14 @@ from dataclasses import dataclass
 
 from flask import request
 
-from .bookings import BOOKINGS
 from .config import AuthConfig, ConfigError
 from .identity_service import ID_COOKIE, IdentityService, ensure_identity_indexes
 from .ratelimit import COUNTERS, EVENTS, RateLimiter
 from .routes import bp, current_passenger, require_passenger
-from .service import OTP_SESSIONS, OtpService
 from .sessions import COOKIE_NAME, PASSENGER_SESSIONS, Passenger, SessionError, SessionManager
 from .sms import SMS_LOG, SmsProvider, build_sms_provider
+from .stores import BookingStore, CitizenStore, drop_legacy_indexes
+from .vault import Vault
 from .timeutil import fmt_ist, utcnow
 
 __all__ = ["init_passenger_auth", "require_passenger", "current_passenger", "Passenger",
@@ -46,16 +47,15 @@ class PassengerAuthState:
     clock: object
     sms: SmsProvider
     sessions: SessionManager
-    otp: OtpService
     identity: IdentityService
+    vault: Vault
+    citizens: CitizenStore
+    bookings: BookingStore
 
 
 def ensure_auth_indexes(db) -> None:
     """Idempotent. TTL indexes on `purgeAt` give automatic cleanup of old records."""
     specs = [
-        (BOOKINGS,           [("pnr", 1), ("passengerSeq", 1)], {"unique": True}),
-        (OTP_SESSIONS,       [("pnr", 1), ("phone", 1), ("status", 1), ("createdAt", -1)], {}),
-        (OTP_SESSIONS,       [("purgeAt", 1)], {"expireAfterSeconds": 0}),
         (PASSENGER_SESSIONS, [("sidHash", 1)], {"unique": True}),
         (PASSENGER_SESSIONS, [("purgeAt", 1)], {"expireAfterSeconds": 0}),
         (COUNTERS,           [("purgeAt", 1)], {"expireAfterSeconds": 0}),
@@ -76,13 +76,20 @@ def init_passenger_auth(app, db, config=None, sms_provider=None, clock=None, env
     clock = clock or utcnow
     sms = sms_provider or build_sms_provider(config, db, env, clock=clock)
     limiter = RateLimiter(db, clock)
+    vault = Vault.from_env(config.signing_secret, env)
+    citizens, bookings = CitizenStore(db, vault), BookingStore(db, vault)
     state = PassengerAuthState(
         db=db, config=config, clock=clock, sms=sms,
         sessions=SessionManager(db, config, clock),
-        otp=OtpService(db, config, sms, limiter, clock),
-        identity=IdentityService(db, config, sms, limiter, clock),
+        identity=IdentityService(db, config, sms, limiter, clock, citizens, bookings),
+        vault=vault, citizens=citizens, bookings=bookings,
     )
     app.extensions["passenger_auth"] = state
+    # Both mock databases are encrypted at rest; seal anything written before that.
+    drop_legacy_indexes(db)
+    migrated = citizens.migrate_plaintext() + bookings.migrate_plaintext()
+    if migrated:
+        logger.info("Encrypted %d clear-text mock UIDAI / PNR record(s) at startup.", migrated)
     ensure_auth_indexes(db)
     ensure_identity_indexes(db)
     app.register_blueprint(bp)
@@ -103,5 +110,5 @@ def init_passenger_auth(app, db, config=None, sms_provider=None, clock=None, env
             return state.identity.load_session(request.cookies.get(ID_COOKIE))
         return {"nav_passenger": nav_passenger, "nav_identity": nav_identity}
 
-    logger.info("Passenger OTP auth enabled (SMS provider: %s).", sms.name)
+    logger.info("Passenger two-layer auth enabled: Aadhaar then PNR (SMS provider: %s).", sms.name)
     return state

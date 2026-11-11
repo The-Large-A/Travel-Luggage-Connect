@@ -44,20 +44,66 @@ def test_spaces_and_dashes_are_accepted():
     assert parse_id_number(ARUN_AADHAAR[:4] + "-" + ARUN_AADHAAR[4:]) == (AADHAAR, ARUN_AADHAAR)
 
 
-def test_the_mock_uidai_never_stores_a_number(db):
-    for doc in db[MOCK_UIDAI].find():
+def test_the_mock_uidai_database_is_encrypted(db):
+    from passenger_auth.stores import CitizenStore
+    from passenger_auth.vault import Vault
+    docs = list(db[MOCK_UIDAI].find())
+    assert len(docs) == len(MOCK_CITIZENS)
+    for doc in docs:
+        assert set(doc) == {"_id", "aadhaarToken", "vidToken", "sealed"}       # nothing else in clear
         flat = repr(doc)
-        for aadhaar, vid, *_ in MOCK_CITIZENS:
-            assert aadhaar not in flat and vid not in flat
-        assert len(doc["last4"]) == 4
+        for aadhaar, vid, name, _yob, _g, phone in MOCK_CITIZENS:
+            assert aadhaar not in flat and vid not in flat and phone not in flat and name not in flat
+            assert aadhaar[-4:] not in doc["sealed"]["ct"]                       # last 4 are sealed too
+    store = CitizenStore(db, Vault.from_env(TEST_SECRET))
+    rec = store.by_token("aadhaarToken", id_token(token_key(TEST_SECRET), AADHAAR, ARUN_AADHAAR))
+    assert rec["name"] == "Arun Kumar" and rec["last4"] == ARUN_AADHAAR[-4:]
 
 
-def test_bookings_carry_only_a_token_and_last4(db):
-    arun = db.bookings.find_one({"pnr": ARUN["pnr"]})
+def test_the_mock_pnr_database_is_encrypted(db):
+    from passenger_auth.stores import BookingStore
+    from passenger_auth.vault import Vault
+    for doc in db.bookings.find():
+        assert set(doc) <= {"_id", "pnrIndex", "passengerSeq", "sealed", "createdAt", "updatedAt"}
+        flat = repr(doc)
+        assert "T261001" not in flat and "Arun" not in flat and "+91" not in flat and "SETC" not in flat
+    arun = BookingStore(db, Vault.from_env(TEST_SECRET)).rows(ARUN["pnr"])[0]
     assert arun["idProof"] == {"type": "aadhaar", "last4": ARUN_AADHAAR[-4:],
                                "token": id_token(token_key(TEST_SECRET), AADHAAR, ARUN_AADHAAR)}
     assert ARUN_AADHAAR not in repr(arun)
-    assert db.bookings.find_one({"pnr": PRIYA["pnr"]})["idProof"]["type"] == "driving_licence"
+
+
+def test_a_wrong_key_cannot_read_either_database(db):
+    from passenger_auth.stores import BookingStore, CitizenStore
+    from passenger_auth.vault import Vault
+    other = Vault.from_env("a-completely-different-signing-secret-0123456789")
+    assert BookingStore(db, other).rows(ARUN["pnr"]) == []           # index differs, and nothing decrypts
+    assert CitizenStore(db, other).by_token(
+        "aadhaarToken", id_token(token_key(TEST_SECRET), AADHAAR, ARUN_AADHAAR)) is None
+
+
+def test_a_moved_ciphertext_is_rejected(db):
+    from passenger_auth.stores import BookingStore
+    from passenger_auth.vault import Vault
+    store = BookingStore(db, Vault.from_env(TEST_SECRET))
+    arun = db.bookings.find_one({"pnrIndex": store.index(ARUN["pnr"])})
+    priya = db.bookings.find_one({"pnrIndex": store.index(PRIYA["pnr"])})
+    # An attacker with database write access copies Arun's sealed row onto Priya's PNR.
+    db.bookings.update_one({"_id": priya["_id"]}, {"$set": {"sealed": arun["sealed"]}})
+    assert store.rows(PRIYA["pnr"]) == []                            # AAD binding: does not decrypt
+
+
+def test_clear_text_records_are_sealed_at_startup(db, clock, sms):
+    from conftest import build_app
+    db.bookings.insert_one({"pnr": "T26199999", "passengerSeq": 1, "passengerName": "Legacy Row",
+                            "registeredPhone": "+919000000001", "status": "confirmed", "travelDate": "2026-11-01"})
+    db[MOCK_UIDAI].insert_one({"aadhaarToken": "legacytoken", "vidToken": "legacyvid", "last4": "1234",
+                               "name": "Legacy Person", "linkedPhone": "+919000000001", "status": "active"})
+    app = build_app(db, clock, sms)
+    assert "Legacy" not in repr(list(db.bookings.find())) + repr(list(db[MOCK_UIDAI].find()))
+    state = app.extensions["passenger_auth"]
+    assert state.bookings.rows("T26199999")[0]["passengerName"] == "Legacy Row"
+    assert state.citizens.by_token("aadhaarToken", "legacytoken")["name"] == "Legacy Person"
 
 
 @pytest.mark.parametrize("a,b,ok", [
@@ -88,7 +134,7 @@ def link(client, pnr):
 # ── login ────────────────────────────────────────────────────────────────────
 def test_aadhaar_login_then_pnr_link_issues_a_bound_session(client, sms):
     page = client.get("/passenger/login")
-    assert b"Aadhaar / VID" in page.data and b"PNR + mobile" in page.data
+    assert b"Aadhaar / VID" in page.data and b"Ticket PNR" in page.data
 
     resp = request_id_otp(client, ARUN_AADHAAR)
     assert resp.status_code == 202
@@ -170,11 +216,15 @@ def test_someone_elses_pnr_is_refused(client, sms):
     assert client.get("/auth/me").status_code == 401
 
 
-def test_booking_with_another_id_points_to_the_pnr_login(client, sms):
-    verify_id(client, sms, PRIYA_AADHAAR)                      # Priya booked with a driving licence
+def test_booking_under_another_id_fails_layer_two(client, sms, db):
+    from passenger_auth.stores import BookingStore
+    from passenger_auth.vault import Vault
+    BookingStore(db, Vault.from_env(TEST_SECRET)).update(
+        PRIYA["pnr"], {"idProof": {"type": "driving_licence", "token": None, "last4": "4821"}})
+    verify_id(client, sms, PRIYA_AADHAAR)
     resp = link(client, PRIYA["pnr"])
-    assert resp.status_code == 404
-    assert "PNR and mobile number" in resp.get_json()["error"]["message"]
+    assert resp.status_code == 404 and resp.get_json()["error"]["code"] == "pnr_not_linked"
+    assert client.get("/auth/me").status_code == 401                # no single-layer way in
 
 
 def test_cancelled_booking_is_not_eligible(client, sms):
@@ -209,8 +259,3 @@ def test_logout_revokes_identity_too(client, sms):
     assert client.post("/auth/logout").status_code == 200
     assert client.get("/auth/id/me").status_code == 401
     assert client.get("/auth/me").status_code == 401
-
-
-def test_pnr_login_still_works_as_the_fallback(flow, client):
-    flow.login(ARUN)
-    assert client.get("/auth/me").get_json()["passenger"]["authMethod"] == "pnr"
