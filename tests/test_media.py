@@ -296,3 +296,18 @@ def test_matcher_ranks_the_owners_item_first_from_photos(clip, jpgs):
         total += 1
         hits += block[0][0]["found_id"] == target["id"]
     assert total >= 5 and hits / total >= 0.7, (hits, total)
+
+
+def test_brand_logos_without_text(clip, jpgs):
+    """CLIP names a brand from its logo only when sure; it must (almost) never name a wrong one."""
+    from item_intake.analysis import NOUNS, logo_brand
+    found = wrong = 0
+    for item in IMAGES:
+        if not item.get("brand") or item["app_category"] not in ("bag", "wallet", "phone", "laptop", "spectacles"):
+            continue
+        guess = logo_brand(clip, [jpgs[item["id"]]], item["app_category"], NOUNS[item["app_category"]])
+        if guess:
+            found += 1
+            wrong += guess["name"].lower().split()[0] != item["brand"].lower().split()[0]
+    print(f"\nlogo brands named: {found}, wrong: {wrong}")
+    assert found >= 4 and wrong <= max(0, found // 10)

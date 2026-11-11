@@ -274,9 +274,21 @@
         stopScan();
         $('save-error').classList.add('hidden');
         if (!$('route-id').value) return showSaveError('Choose the route the item was found on.');
+        const details = {};
+        for (const k of ['content_item', 'lock_screen', 'tag_text', 'distinguishing_mark', 'colour']) {
+            const v = $('detail-' + k).value.trim();
+            if (v) details['detail_' + k] = v;
+        }
+        const camCanAsk = (state.counts && (state.counts.inside > 0 || state.counts.closeups > 0));
+        if (!Object.keys(details).length && !camCanAsk &&
+            !confirm('No ownership details yet. Without an inside view, a tag close-up or a detail typed above, ' +
+                     'passengers cannot be asked security questions and will be checked by depot staff at pickup. Save anyway?')) {
+            return;
+        }
         $('save-btn').disabled = true;
         const body = { route_id: $('route-id').value, trip_id: $('trip').value || null,
-                       date: $('found-date').value, found_seat_area: $('seat-area').value || null };
+                       date: $('found-date').value, found_seat_area: $('seat-area').value || null,
+                       category: $('item-category').value || null, ...details };
         const { status, data } = await api('POST', `/api/intake/drafts/${state.draft}/finalize`, body);
         if (status !== 202) { $('save-btn').disabled = false; return showSaveError((data.error && data.error.message) || 'Could not save.'); }
         $('progress-card').classList.remove('hidden');
@@ -305,8 +317,11 @@
         $('res-public').textContent = r.publicDescription;
         $('res-tag').textContent = r.qrTagId;
         $('res-matches').textContent = r.matches;
-        $('res-questions').textContent = r.questions.length ? r.questions.length + ' (' + r.questions.join(', ').replace(/_/g, ' ') + ')'
-            : 'None confident enough — passengers will be verified by depot staff';
+        const names = r.questions.join(', ').replace(/_/g, ' ');
+        $('res-questions').textContent = r.questionsReady
+            ? `${r.questions.length} ready (${names})` + (r.hiddenQuestion ? '' : ' — none hidden, so claims also get a staff ID check')
+            : (r.questions.length ? `Only 1 (${names}) — ` : 'None — ') + 'passengers will be checked by depot staff at pickup';
+        for (const k of ['content_item', 'lock_screen', 'tag_text', 'distinguishing_mark', 'colour']) $('detail-' + k).value = '';
         $('res-print').href = `/staff/items/${r.foundId}/tag`;
         if (state.stream) state.stream.getTracks().forEach(t => t.stop());
     }

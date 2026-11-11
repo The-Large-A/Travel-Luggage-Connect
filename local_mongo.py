@@ -159,11 +159,30 @@ def reset():
     seed()
 
 
+# A demo has a whole team logging in as the same few mock passengers, so the
+# local runner relaxes the per-number / per-IP OTP limits (production keeps the
+# strict defaults). Anything set in the shell environment still wins.
+DEMO_LIMITS = {"OTP_MAX_REQUESTS_PER_PNR_PER_HOUR": "30", "OTP_IP_REQUEST_LIMIT": "300",
+               "OTP_IP_VERIFY_LIMIT": "500", "OTP_RESEND_SECONDS": "10"}
+
+
 def app():
     start()
-    env = _local_env(SMS_MOCK_EXPOSE_OTP=os.environ.get("SMS_MOCK_EXPOSE_OTP", "1"))
+    extra = {k: os.environ.get(k, v) for k, v in DEMO_LIMITS.items()}
+    env = _local_env(SMS_MOCK_EXPOSE_OTP=os.environ.get("SMS_MOCK_EXPOSE_OTP", "1"), **extra)
     print(f"Starting app.py on {LOCAL_URI}. OTPs appear below as '[MOCK SMS] ... purpose=otp: <code>'.")
-    sys.exit(subprocess.call([sys.executable, os.path.join(ROOT, "app.py")], cwd=ROOT, env=env))
+    print("Press Ctrl+C to stop.")
+    proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "app.py")], cwd=ROOT, env=env)
+    try:
+        code = proc.wait()
+    except KeyboardInterrupt:                  # Ctrl+C: the app gets it too; wait for it, exit quietly
+        try:
+            code = proc.wait(timeout=10)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            proc.kill()
+            code = 0
+        print("\nApp stopped. The local database keeps running; `python local_mongo.py stop` stops it.")
+    sys.exit(code if code not in (None, -2, 130, 3221225786) else 0)
 
 
 def main(argv=None):

@@ -66,6 +66,37 @@ def _presence(classifier, paths, noun, thing):
     return res[f"{noun} with {thing}"] if res else 0.0
 
 
+# A logo-only brand guess is accepted only when CLIP is this sure on ONE view and
+# far ahead of the runner-up. Measured on 26 Commons photos with known brands:
+# every guess at >= 0.75 was right (Adidas, Apple, Microsoft x2, Asus, Acer); all
+# wrong guesses were <= 0.56. A wrong brand would be a false contradiction for
+# the matcher, so precision matters more than finding every logo.
+LOGO_MIN_PROB = 0.75
+LOGO_MIN_RATIO = 3.0
+
+
+def logo_brand(classifier, paths, category, noun):
+    """{"name", "confidence", "source": "logo"} from a visible logo (no text needed), or None."""
+    brands = list(BRANDS.get(category) or ())
+    if not brands or not paths:
+        return None
+    labels = [f"a {noun} with the {b} logo" for b in brands] + [f"a plain {noun} with no visible logo"]
+    votes = {}
+    for path in paths[:8]:                       # per view: a logo is usually visible on one side only
+        res = classifier.zero_shot([path], labels, template="a photo of {}") or {}
+        if not res:
+            continue
+        ranked = sorted(res.items(), key=lambda kv: -kv[1])
+        (top, p1), p2 = ranked[0], ranked[1][1] if len(ranked) > 1 else 0.0
+        brand = next((b for b in brands if f" {b} logo" in top), None)
+        if brand and p1 >= LOGO_MIN_PROB and p1 >= LOGO_MIN_RATIO * p2:
+            votes[brand] = max(votes.get(brand, 0.0), p1)
+    if len(votes) != 1:                          # none, or two views disagree: no guess at all
+        return None
+    name, p = next(iter(votes.items()))
+    return {"name": name, "confidence": round(min(0.9, p), 3), "source": "logo"}
+
+
 def analyse(frames: dict, classifier, ocr, captioner, progress=lambda pct, stage: None) -> dict:
     outside = frames.get("outside") or []
     inside = frames.get("inside") or []
@@ -169,6 +200,9 @@ def analyse(frames: dict, classifier, ocr, captioner, progress=lambda pct, stage
         if re.search(rf"(?<![a-z]){re.escape(b.lower())}(?![a-z])", ocr_text):
             brand = {"name": b, "confidence": 0.9 if b in candidates else 0.75}
             break
+    if brand is None and clip_ok:
+        progress(72, "Looking for a brand logo")
+        brand = logo_brand(classifier, outside + details + tags, category, noun)
     facts["brand"] = brand
 
     tag_text = None

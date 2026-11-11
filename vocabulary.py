@@ -35,10 +35,13 @@ EXTERNAL_FEATURES = ("wheels", "telescopic handle", "shoulder strap", "carry han
 
 BRANDS = {
     "bag": ("Wildcraft", "American Tourister", "Skybags", "VIP", "Safari", "Aristocrat", "Puma", "Nike",
-            "Adidas", "F Gear", "Lavie", "Caprese", "Samsonite"),
-    "wallet": ("Woodland", "Tommy Hilfiger", "Allen Solly", "Hidesign", "Lavie", "Caprese", "Baggit"),
-    "phone": ("Samsung", "Apple", "Redmi", "Xiaomi", "Vivo", "Oppo", "Realme", "OnePlus", "Motorola", "Nokia"),
-    "laptop": ("Dell", "HP", "Lenovo", "Asus", "Acer", "Apple", "MSI"),
+            "Adidas", "F Gear", "Lavie", "Caprese", "Samsonite", "Eastpak", "Quechua", "Rimowa", "Coach",
+            "Tommy Hilfiger"),
+    "wallet": ("Woodland", "Tommy Hilfiger", "Allen Solly", "Hidesign", "Lavie", "Caprese", "Baggit", "Prada",
+               "Coach"),
+    "phone": ("Samsung", "Apple", "Redmi", "Xiaomi", "Vivo", "Oppo", "Realme", "OnePlus", "Motorola", "Nokia",
+              "Sony", "Microsoft", "Google"),
+    "laptop": ("Dell", "HP", "Lenovo", "Asus", "Acer", "Apple", "MSI", "Microsoft"),
     "spectacles": ("Lenskart", "Titan", "Ray-Ban", "Vincent Chase", "Fastrack"),
     "umbrella": ("Popy", "John's", "Citizen", "Sun Brand"),
     "clothing": ("Raymond", "Peter England", "Allen Solly", "Louis Philippe", "Van Heusen", "Pothys", "RmKV",
@@ -300,21 +303,146 @@ _COLOUR_SET = frozenset(COLOURS)
 SLOTS = ("colour", "brand", "contents", "marks")
 
 
-def detail_slots(text) -> dict:
+# ── item-specific detail prompts (the clickable bubbles on the report form) ──
+# Per kind of item, the details that best tell one item from another, the ones
+# that IDENTIFY first (brand, a name, a serial, what was inside), because those
+# are what let the matcher notify the owner without waiting for staff.
+# Each prompt: key, chip text, the words inserted on click, how to tell it is
+# already covered ("colour" | "brand" | "contents" | "marks" | "digits" | a word
+# list), and whether it counts towards the readiness score ("core").
+# {brands} becomes this kind of item's own brand examples.
+DETAIL_PROMPTS = {
+    "bag": [
+        ("brand", "Brand ({brands})", "Brand: ", "brand", True),
+        ("contents", "What was inside?", "Inside: ", "contents", True),
+        ("colour", "Colour / material", "Colour: ", "colour", True),
+        ("marks", "Sticker, keychain or patch?", "Marks: ", "marks", True),
+        ("name", "Name or initials on a tag?", "Name on tag: ", ("tag", "nametag", "initials", "name", "written"), False),
+        ("zip", "Zip pull / tag colour", "Zip pull colour: ", ("zip", "zipper", "pull", "chain"), False),
+        ("type", "Backpack, trolley, sling or handbag?", "Type: ", ("backpack", "trolley", "suitcase", "sling", "handbag",
+                                                                    "duffel", "tote", "briefcase", "schoolbag"), False),
+        ("size", "Size (small / cabin / large, litres)", "Size: ", ("small", "medium", "large", "cabin", "litre",
+                                                                     "litres", "big"), False),
+    ],
+    "wallet": [
+        ("brand", "Brand ({brands})", "Brand: ", "brand", True),
+        ("contents", "Cards, cash or a photo inside? (no card numbers)", "Inside: ", "contents", True),
+        ("colour", "Colour / leather or cloth", "Colour: ", "colour", True),
+        ("marks", "Initials, a mark or worn corner?", "Marks: ", "marks", True),
+        ("type", "Folding, long or zip purse?", "Type: ", ("bifold", "trifold", "folding", "long", "zip", "zipper",
+                                                           "clutch", "pouch"), False),
+    ],
+    "phone": [
+        ("brand", "Brand & model ({brands})", "Phone: ", "brand", True),
+        ("case", "Case or cover colour", "Case: ", ("case", "cover", "pouch", "flip", "bumper"), True),
+        ("colour", "Phone colour", "Phone colour: ", "colour", True),
+        ("marks", "Cracks, stickers or a scratch?", "Marks: ", ("crack", "cracked", "broken", "sticker", "scratch",
+                                                                 "scratches", "dent", "keeral"), True),
+        ("wallpaper", "Lock-screen picture", "Wallpaper: ", ("wallpaper", "lockscreen", "lock", "screen"), False),
+        ("serial", "IMEI (from the box or bill)", "IMEI: ", "digits", False),
+    ],
+    "laptop": [
+        ("brand", "Brand & model ({brands})", "Laptop: ", "brand", True),
+        ("colour", "Colour", "Colour: ", "colour", True),
+        ("marks", "Stickers or marks on the lid?", "Lid: ", ("sticker", "stickers", "scratch", "dent", "mark", "lid"), True),
+        ("sleeve", "Sleeve, cover or bag?", "Sleeve: ", ("sleeve", "cover", "case", "bag", "pouch"), True),
+        ("serial", "Serial number (from the box or bill)", "Serial: ", "digits", False),
+        ("charger", "Charger or mouse with it?", "With it: ", ("charger", "adapter", "mouse", "cable"), False),
+        ("wallpaper", "Login-screen picture", "Wallpaper: ", ("wallpaper", "lockscreen", "screen", "background"), False),
+    ],
+    "spectacles": [
+        ("type", "Power glasses or sunglasses?", "Type: ", ("power", "reading", "sunglasses", "sun", "goggles",
+                                                            "cooling", "computer", "lens", "lenses"), True),
+        ("colour", "Frame colour", "Frame: ", "colour", True),
+        ("case", "Case colour or type", "Case: ", ("case", "box", "pouch", "cover"), True),
+        ("brand", "Brand ({brands})", "Brand: ", "brand", False),
+        ("marks", "A repair, scratch or bent arm?", "Marks: ", ("scratch", "bent", "broken", "tape", "repair", "screw"), False),
+    ],
+    "umbrella": [
+        ("colour", "Colour / pattern", "Colour: ", "colour", True),
+        ("type", "Folding or long?", "Type: ", ("folding", "fold", "foldable", "long", "stick", "compact", "automatic",
+                                                "auto"), True),
+        ("handle", "Handle colour and shape", "Handle: ", ("handle", "hook", "curved", "straight", "grip"), True),
+        ("marks", "A tear, patch or name?", "Marks: ", "marks", True),
+        ("brand", "Brand ({brands})", "Brand: ", "brand", False),
+        ("cover", "Cover / sleeve with it?", "Cover: ", ("cover", "sleeve", "pouch", "case"), False),
+    ],
+    "documents": [
+        ("name", "Whose name is on them?", "Name on documents: ", ("name", "written", "my"), True),
+        ("contents", "Which documents? (certificates, bills…)", "Documents: ", "contents", True),
+        ("folder", "Folder or cover colour", "Folder: ", ("folder", "file", "cover", "envelope", "plastic"), True),
+        ("count", "How many papers or files?", "How many: ", "digits_or_count", False),
+    ],
+    "clothing": [
+        ("type", "What exactly? (shirt, jacket, shawl…)", "Item: ", ("shirt", "jacket", "sweater", "shawl", "saree",
+                                                                     "dress", "cap", "hat", "hoodie", "coat", "kurta",
+                                                                     "dupatta", "veshti", "lungi", "jerkin", "clothes"), True),
+        ("colour", "Colour / pattern", "Colour: ", "colour", True),
+        ("brand", "Brand label ({brands})", "Label: ", "brand", True),
+        ("size", "Size (S / M / L / XL)", "Size: ", ("size", "small", "medium", "large", "xl", "xxl", "s", "m", "l"), False),
+        ("pockets", "Anything in the pockets?", "In the pockets: ", "contents", False),
+        ("marks", "A stain, tear or name label?", "Marks: ", "marks", False),
+    ],
+    "other": [
+        ("what", "What exactly is it?", "It is a ", "anything", True),
+        ("colour", "Colour / material", "Colour: ", "colour", True),
+        ("marks", "A sticker, mark or name on it?", "Marks: ", "marks", True),
+        ("brand", "Brand", "Brand: ", "brand", False),
+    ],
+}
+assert set(DETAIL_PROMPTS) == set(CATEGORY_LABELS)
+
+
+def _prompt_done(kind, text, toks, words, norm) -> bool:
+    if kind == "colour":
+        return bool(toks & _COLOUR_SET or words & _MATERIAL_SET)
+    if kind == "brand":
+        return any(re.search(rf"(?<!\w){re.escape(b)}(?!\w)", norm) for b in _BRAND_TOKENS if b)
+    if kind == "contents":
+        return bool(toks & _CONTENT_SET)
+    if kind == "marks":
+        return bool(words & _MARK_SET or toks & {"sticker", "scratch"})
+    if kind == "digits":
+        return bool(re.search(r"\d{5,}", re.sub(r"[\s-]", "", text or "")))
+    if kind == "digits_or_count":
+        return bool(re.search(r"\d", text or "")) or bool(words & {"one", "two", "three", "few", "many", "several"})
+    if kind == "anything":
+        return len(words) >= 3
+    return bool(words & set(kind) or toks & set(kind))
+
+
+def _label_filled(insert, norm) -> bool:
+    """'Brand: Pesoma' answers the brand prompt even for a brand we have never heard of."""
+    label = normalize_text(insert)
+    return bool(label) and bool(re.search(rf"(?<!\w){re.escape(label)} \S", norm))
+
+
+def detail_prompts(category) -> list:
+    """The bubbles for one kind of item, with its own brand examples filled in."""
+    category = category if category in DETAIL_PROMPTS else "other"
+    examples = ", ".join(BRANDS.get(category, ())[:3]) or "if any"
+    return [{"key": k, "chip": chip.format(brands=examples), "insert": insert, "core": core,
+             "match": kind if isinstance(kind, str) else list(kind)}
+            for k, chip, insert, kind, core in DETAIL_PROMPTS[category]]
+
+
+def detail_slots(text, category=None) -> dict:
     """
-    Which of the four details a description covers: colour/material, brand,
-    contents, distinguishing marks. Each slot is worth 25 points.
-    Server-side twin of the client meter in static/js/report-form.js.
+    Which details a description covers. With a category: that item's own prompts,
+    scored over its core ones (a phone is never asked what was inside it). Without:
+    the original four slots (colour/material, brand, contents, marks), 25 each.
+    Server-side twin of the meter in static/js/report-form.js.
     """
     norm = normalize_text(text or "")
     toks = set(tokens(text or ""))
     words = set(norm.split())
-    found = {
-        "colour": bool(toks & _COLOUR_SET or words & _MATERIAL_SET),
-        "brand": any(re.search(rf"(?<!\w){re.escape(b)}(?!\w)", norm) for b in _BRAND_TOKENS if b),
-        "contents": bool(toks & _CONTENT_SET),
-        "marks": bool(words & _MARK_SET or toks & {"sticker", "scratch"}),
-    }
+    if category in DETAIL_PROMPTS:
+        found = {k: _prompt_done(kind, text, toks, words, norm) or _label_filled(insert, norm)
+                 for k, _c, insert, kind, _core in DETAIL_PROMPTS[category]}
+        core = [k for k, _c, _i, _kind, is_core in DETAIL_PROMPTS[category] if is_core]
+        found["score"] = round(100 * sum(found[k] for k in core) / len(core))
+        return found
+    found = {s: _prompt_done(s, text, toks, words, norm) for s in SLOTS}
     found["score"] = 25 * sum(found[s] for s in SLOTS)
     return found
 
@@ -325,7 +453,7 @@ def vocabulary_payload() -> dict:
         return {k: sorted({unicodedata.normalize("NFC", v).casefold() for v in table[k]} | {k}) for k in keys}
     return {
         "categories": [{"key": k, "label": CATEGORY_LABELS[k][0], "tamil": CATEGORY_LABELS[k][1],
-                        "hints": list(CATEGORY_HINTS.get(k, ()))} for k in CATEGORIES],
+                        "hints": list(CATEGORY_HINTS.get(k, ())), "prompts": detail_prompts(k)} for k in CATEGORIES],
         "storage": [{"key": k, "label": label, "tamil": ta} for k, label, ta in STORAGE_LOCATIONS],
         "colours": variants(COLOURS, COLOURS),
         "materials": list(MATERIALS),

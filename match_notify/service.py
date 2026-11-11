@@ -302,10 +302,21 @@ class MatchNotifyService:
         if sent:
             self.matches.update_one({"_id": match_id},
                                     {"$set": {"deliveryStatus": "delivered", "deliveredVia": sent["channel"]}})
+            self._skip_uncontactable(match_id, sent["channel"])
         else:
             self.matches.update_one({"_id": match_id}, {"$set": {"deliveryStatus": "failed"}})
             logger.warning("Match %s: every notification channel failed; surfaced to staff.", match_id)
         self._mark_notified(match_id)
+
+    def _skip_uncontactable(self, match_id, delivered_via):
+        """
+        A channel the passenger simply does not have (no WhatsApp on file) was never
+        attempted: once another channel delivered, it is "skipped", not a failure.
+        """
+        self.notifications.update_many(
+            {"matchId": str(match_id), "channel": {"$in": EXTERNAL_CHANNELS}, "status": "failed",
+             "attempts": 0, "lastError": {"$regex": "^passenger has no "}},
+            {"$set": {"status": "skipped", "coveredBy": delivered_via}})
 
     def _mark_notified(self, match_id):
         now = self.clock()
@@ -371,6 +382,7 @@ class MatchNotifyService:
             logger.info("Notification %s sent via %s (attempt %d).", job["_id"], job["channel"], job["attempts"])
             self.matches.update_one({"_id": match["_id"]},
                                     {"$set": {"deliveryStatus": "delivered", "deliveredVia": job["channel"]}})
+            self._skip_uncontactable(match["_id"], job["channel"])
             self._mark_notified(match["_id"])
 
     def _job_failed(self, job, worker_id, err):
@@ -592,7 +604,7 @@ class MatchNotifyService:
             "matchId": str(match["_id"]),
             "reportId": lost.get("tracking_id"),
             "state": state,
-            "confidencePercent": max(0, min(100, round(float(match.get("confidence", 0)) * 100))),
+            "confidencePercent": max(0, min(99, round(float(match.get("confidence", 0)) * 100))),   # never "100%": a probability
             "foundAt": clean_text(depot.get("name") or found.get("depot_name"), 80),
             "itemDescription": public_item_description(found.get("public_description"),
                                                        self.config.description_max_chars)
@@ -654,7 +666,9 @@ class MatchNotifyService:
             rows.append({
                 "id": str(n["_id"]), "matchId": n["matchId"], "reportId": lost.get("tracking_id"),
                 "channel": n["channel"], "status": n["status"], "attempts": n.get("attempts", 0),
-                "maxAttempts": n.get("maxAttempts"), "lastError": n.get("lastError"),
+                "maxAttempts": n.get("maxAttempts"),
+                "lastError": (f"{n.get('lastError')}: sent by {n['coveredBy']} instead" if n.get("coveredBy")
+                              else n.get("lastError")),
                 "to": n.get("toMasked"), "retryCount": n.get("retryCount", 0),
                 "retryable": n["status"] == "failed" and self.retry_blocker(n) is None,
                 "sentAt": iso_utc(n["sentAt"]) if n.get("sentAt") else None,

@@ -36,7 +36,7 @@ from .service import ALL_STATUSES, PENDING_REVIEW, Conflict, NotFound
 bp = Blueprint("match_notify", __name__)
 
 STATUS_ALIASES = {"staff_review": PENDING_REVIEW}
-NOTIFICATION_STATUSES = ("pending", "sent", "failed", "delivered", "cancelled")
+NOTIFICATION_STATUSES = ("pending", "sent", "failed", "skipped", "delivered", "cancelled")
 
 
 def _svc():

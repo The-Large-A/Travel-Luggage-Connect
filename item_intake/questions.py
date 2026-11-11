@@ -23,6 +23,12 @@ from vocabulary import CATEGORY_LABELS
 CATEGORY_GATE_CONFIDENCE = 0.8
 CATEGORY_GATE_MARGIN = 0.2
 
+# What staff can type during a scan: facts the camera cannot see or read.
+# "colour" goes to whichever colour question suits the item (zip pull, case, handle).
+STAFF_DETAIL_FIELDS = ("content_item", "lock_screen", "tag_text", "distinguishing_mark", "colour")
+_COLOUR_ATTR = {"bag": "zipper_tag_colour", "phone": "case_colour", "laptop": "case_colour",
+                "spectacles": "case_colour", "umbrella": "handle_colour"}
+
 
 def public_description(facts) -> str:
     colour = facts["colours"][0]["name"].title() if facts.get("colours") else ""
@@ -39,7 +45,7 @@ def question_category(facts) -> str:
     return category if sure else "other"
 
 
-def build_answers(facts: dict, min_conf: float) -> tuple:
+def build_answers(facts: dict, min_conf: float, staff_details=None) -> tuple:
     """
     Returns (raw_attributes, choices, report, question_category). raw_attributes
     go straight into claims.encode_private_attributes (hashed there); `report`
@@ -70,7 +76,7 @@ def build_answers(facts: dict, min_conf: float) -> tuple:
 
     brand = facts.get("brand")
     if brand:
-        consider("brand", brand["name"], brand["confidence"], "OCR")
+        consider("brand", brand["name"], brand["confidence"], "logo" if brand.get("source") == "logo" else "OCR")
 
     tag = facts.get("tagText")
     if tag:
@@ -79,6 +85,16 @@ def build_answers(facts: dict, min_conf: float) -> tuple:
     marks = [f for f in facts.get("features") or [] if f["name"] in ("keychain", "name tag", "sticker", "patch")]
     if marks:
         consider("distinguishing_mark", marks[0]["name"], marks[0]["confidence"], "outside views")
+
+    # Details staff typed while scanning: what the camera cannot know. They replace a
+    # camera guess for the same question; one that does not suit this item is reported.
+    for field, value in (staff_details or {}).items():
+        name = _COLOUR_ATTR.get(qcat) if field == "colour" else field
+        if not name:
+            report[f"staff_{field}"] = {"confidence": 1.0, "asQuestion": False, "source": "staff",
+                                        "skipped": "does not suit this item"}
+            continue
+        consider(name, value, 1.0, "staff")
 
     seen_inside = [c["name"] for c in contents]
     raw, choices = build_choices(raw, qcat, {k: a["kind"] for k, a in ATTRIBUTES.items()},
@@ -100,7 +116,8 @@ def private_notes(facts: dict, report: dict) -> str:
     if facts.get("contents"):
         lines.append("Inside: " + ", ".join(c["name"] for c in facts["contents"]) + ".")
     if facts.get("brand"):
-        lines.append(f"Brand: {facts['brand']['name']}.")
+        how = " (recognised from its logo)" if facts["brand"].get("source") == "logo" else ""
+        lines.append(f"Brand: {facts['brand']['name']}{how}.")
     if facts.get("tagText"):
         lines.append(f"Text on tag: \"{facts['tagText']['text']}\".")
     if facts.get("detailColour"):

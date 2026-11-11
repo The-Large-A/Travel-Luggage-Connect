@@ -238,7 +238,7 @@ def test_photo_and_description_vs_photo():
     imgs = FakeImages(photo={"a.jpg": 0.95}, cross={"red bag": 0.32})
     s = M(images=imgs).score(found("bag", images=["a.jpg"]), lost("red bag", image_path="l.jpg"))
     assert signals(s)["photo"] == 4.0 and "photo" in s["identifying"]
-    assert signals(s)["description_vs_photo"] == 2.0
+    assert signals(s)["description_vs_photo"] == 1.5                         # capped: mostly re-states the category
     no_photo = M(images=imgs).score(found("bag"), lost("red bag"))
     assert "photo" not in signals(no_photo) and "description_vs_photo" not in signals(no_photo)
 
@@ -384,3 +384,31 @@ def test_benchmark_ambiguous_reports_go_to_staff_not_straight_out(rid):
     decisions = _v2_decisions()
     lo = next(x for x in cases.LOST if x["request_id"] == rid)
     assert decisions.get((rid, lo["truth"])) == "review"
+
+
+# ── colour shares (camera scans) ───────────────────────────────────────────────
+def _scan(*colours):
+    return found("A laptop. Colours: " + ", ".join(f"{c} {int(s * 100)}%" for c, s in colours) + ".",
+                 category="laptop", captureMode="camera_scan",
+                 attributes={"category": {"value": "laptop", "confidence": 0.97},
+                             "colours": [{"name": c, "share": s} for c, s in colours]})
+
+
+def test_a_small_patch_of_colour_counts_little():
+    """A white laptop with a 12% yellow speck must not be 'both yellow' at full strength."""
+    item = _scan(("white", 0.49), ("brown", 0.19), ("yellow", 0.12))
+    speck = signals(M().score(item, lost("yellow laptop", category="laptop")))
+    main = signals(M().score(item, lost("white laptop", category="laptop")))
+    assert speck["colour"] < 1.5 < main["colour"]
+
+
+def test_missing_the_main_colour_counts_against():
+    item = _scan(("black", 0.7), ("red", 0.2))
+    s = signals(M().score(item, lost("red bag", category="laptop")))
+    assert s["colour_main"] == -1.0
+
+
+def test_scan_notes_do_not_double_count_colours():
+    """The scan's notes repeat its colours as words; only the measured shares count."""
+    item = _scan(("white", 0.9), ("yellow", 0.09))
+    assert signals(M().score(item, lost("yellow laptop", category="laptop")))["colour"] < 1.0

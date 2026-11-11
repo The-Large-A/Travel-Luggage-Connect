@@ -92,12 +92,33 @@
                     <label class="block text-xs font-bold text-slate-600 uppercase">Found near seat no.</label>
                     <input type="number" id="seat-area" min="1" max="80" placeholder="Optional" class="w-full h-[40px] px-2 border border-slate-300 rounded-md">
                 </div>
+                <div class="space-y-1.5">
+                    <label for="item-category" class="block text-xs font-bold text-slate-600 uppercase">What is it?</label>
+                    <select id="item-category" class="w-full h-[40px] px-2 border border-slate-300 rounded-md bg-white">
+                        <option value="">Let the camera decide</option>
+                        <option value="bag">Bag / backpack / suitcase</option><option value="wallet">Wallet / purse</option>
+                        <option value="phone">Mobile phone</option><option value="laptop">Laptop / tablet</option>
+                        <option value="spectacles">Spectacles</option><option value="umbrella">Umbrella</option>
+                        <option value="documents">Documents / files</option><option value="clothing">Clothing</option>
+                        <option value="other">Something else</option>
+                    </select>
+                </div>
+                <fieldset class="space-y-2 p-3 rounded-md border border-amber-200 bg-amber-50/60">
+                    <legend class="px-1 text-xs font-bold text-slate-700 uppercase">Ownership check: what only the owner knows</legend>
+                    <p class="text-[11px] text-slate-600">The camera cannot see inside a bag or a locked screen. Add one or two of these and
+                        the passenger is asked about them. Hashed when you save; nobody can read them back.</p>
+                    <input id="detail-content_item" maxlength="80" autocomplete="off" placeholder="Something inside (e.g. steel tiffin, charger)" class="w-full h-[36px] px-2 border border-slate-300 rounded-md text-sm">
+                    <input id="detail-lock_screen" maxlength="80" autocomplete="off" placeholder="Phone / laptop lock-screen picture" class="w-full h-[36px] px-2 border border-slate-300 rounded-md text-sm">
+                    <input id="detail-tag_text" maxlength="80" autocomplete="off" placeholder="Name or writing on a tag or label" class="w-full h-[36px] px-2 border border-slate-300 rounded-md text-sm">
+                    <input id="detail-distinguishing_mark" maxlength="80" autocomplete="off" placeholder="A sticker, keychain, scratch or mark" class="w-full h-[36px] px-2 border border-slate-300 rounded-md text-sm">
+                    <input id="detail-colour" maxlength="40" autocomplete="off" placeholder="Colour of the zip pull / case / handle" class="w-full h-[36px] px-2 border border-slate-300 rounded-md text-sm">
+                </fieldset>
                 <div id="save-error" role="alert" class="hidden p-3 rounded-md text-sm font-semibold bg-red-50 text-tn-red border border-red-200"></div>
                 <button type="button" id="save-btn" class="w-full btn-gov-primary text-sm uppercase tracking-widest disabled:opacity-50" disabled>
                     Save item automatically
                 </button>
                 <p class="text-[11px] text-slate-500">Saving creates the item record, its QR tag, the custody entry and the security questions, then runs matching.
-                    Only details the system is confident about become questions.</p>
+                    Questions come from the details above, an inside view, and close-ups of a tag or zip pull; camera guesses it is unsure about never become questions.</p>
             </div>
 
             <!-- Progress + result -->

@@ -23,8 +23,8 @@ from datetime import timedelta
 from passenger_auth.timeutil import from_db, iso_utc, to_db
 
 from . import vision
-from .analysis import analyse
-from .questions import build_answers, private_notes, public_description
+from .analysis import NOUNS, analyse
+from .questions import STAFF_DETAIL_FIELDS, build_answers, private_notes, public_description
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,19 @@ class IntakeService:
 
     # ── finalise (automatic saving) ──────────────────────────────────────────
     def finalize(self, draft, depot, journey: dict) -> dict:
+        """
+        `journey` also carries what staff can add that the camera cannot see: the
+        item type ("category", optional) and ownership details ("detail_*": what
+        was inside, the lock screen, a name tag, a mark, the zip/case/handle
+        colour). The details are secrets: they live only in this request and the
+        job, are hashed into the item's questions, and are never written raw to
+        the draft or anywhere else.
+        """
         self._require_capturing(draft)
+        from claims.attributes import CATEGORIES
+        staff_category = journey.get("category") if journey.get("category") in CATEGORIES else None
+        staff_details = {k: str(journey.get(f"detail_{k}")).strip()[:80] for k in STAFF_DETAIL_FIELDS
+                         if isinstance(journey.get(f"detail_{k}"), str) and journey.get(f"detail_{k}").strip()}
         if len(draft["frames"]["outside"]) < self.config.min_views_to_save:
             raise IntakeError(400, "too_few_views",
                               f"Capture at least {self.config.min_views_to_save} different views of the item first.")
@@ -177,7 +189,7 @@ class IntakeService:
                       "progress": {"pct": 5, "stage": "Starting"}, "updatedAt": to_db(self.clock())}})
         if claimed is None:
             raise IntakeError(409, "not_capturing", "This scan is already being saved.")
-        job = self.run_in_app(lambda: self._job(draft["draftId"], depot, journey))
+        job = self.run_in_app(lambda: self._job(draft["draftId"], depot, journey, staff_category, staff_details))
         if self.async_jobs:
             threading.Thread(target=job, name=f"intake-{draft['draftId'][:8]}", daemon=True).start()
         else:
@@ -188,7 +200,7 @@ class IntakeService:
         self.drafts.update_one({"draftId": draft_id}, {"$set": {"progress": {"pct": pct, "stage": stage},
                                                                 "updatedAt": to_db(self.clock())}})
 
-    def _job(self, draft_id, depot, journey):
+    def _job(self, draft_id, depot, journey, staff_category=None, staff_details=None):
         draft = self.drafts.find_one({"draftId": draft_id})
         try:
             # A retry after a failure that happened AFTER the item was stored (e.g.
@@ -202,7 +214,11 @@ class IntakeService:
                 frames[kind] = [self._abs(c["path"]) for c in draft["closeups"] if c["kind"] == kind]
             facts = analyse(frames, self.classifier, self.ocr, self.captioner,
                             progress=lambda pct, stage: self._progress(draft_id, pct, stage))
-            raw, choices, report, qcat = build_answers(facts, self.config.answer_min_confidence)
+            if staff_category:                        # staff looked at the item: their word beats the camera's
+                facts.update(category=staff_category, categoryConfidence=1.0, categoryMargin=1.0,
+                             noun=NOUNS[staff_category], categorySource="staff")
+            raw, choices, report, qcat = build_answers(facts, self.config.answer_min_confidence,
+                                                       staff_details=staff_details)
             self._progress(draft_id, 92, "Saving and matching")
             images = [f["path"] for f in draft["frames"]["outside"]] + [f["path"] for f in draft["frames"]["inside"]]
             images += [c["path"] for c in draft["closeups"]]
@@ -234,14 +250,16 @@ class IntakeService:
     def _mark_done(self, draft_id, found, matches, facts, report):
         if matches is None:
             matches = self.db["matches"].count_documents({"itemId": found["found_id"]})
-        asked = sorted(k for k, v in report.items() if v["asQuestion"]) if report else \
-            sorted(k for k, v in ((found.get("attributes") or {}).get("questions") or {}).items() if v.get("asQuestion"))
+        from claims.attributes import HIDDEN, MIN_QUESTIONS, askable
+        asked = sorted(askable(found))                 # what passengers will really be asked
+        ready = len(asked) >= MIN_QUESTIONS
         self.drafts.update_one({"draftId": draft_id}, {"$set": {
             "status": "done", "progress": {"pct": 100, "stage": "Saved"}, "error": None,
             "facts": {k: facts.get(k) for k in ("category", "categoryConfidence", "colours", "material",
                                                 "features", "captionProvider", "maskedIds")},
             "result": {"foundId": found["found_id"], "qrTagId": found.get("qrTagId"), "matches": matches,
-                       "publicDescription": found.get("public_description"), "questions": asked},
+                       "publicDescription": found.get("public_description"), "questions": asked,
+                       "questionsReady": ready, "hiddenQuestion": bool(HIDDEN & set(asked))},
             "updatedAt": to_db(self.clock())}})
 
     # ── views ────────────────────────────────────────────────────────────────

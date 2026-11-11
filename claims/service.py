@@ -248,8 +248,13 @@ class ClaimsService:
                                       set_fields=common, extra_filter=guard)
                 return self._auto_approve(claim)
             if verdict == BORDERLINE:
+                # Right answers but nothing hidden was asked (e.g. an umbrella) is an ID
+                # check, not "close answers": the passenger is told which it is.
+                nothing_hidden = not any(q in HIDDEN for q in round_outcomes)
+                reason = (f"id_check: answers matched, nothing hidden to ask (trust {score})"
+                          if nothing_hidden and score >= self.config.trust_threshold else f"borderline trust {score}")
                 return sm.transition(self.claims, claim, sm.STAFF_REVIEW, now, "system",
-                                     f"borderline trust {score}", set_fields=common, extra_filter=guard)
+                                     reason, set_fields=common, extra_filter=guard)
             if round_no >= self.config.max_rounds:
                 return sm.transition(self.claims, claim, sm.LOCKED, now, "system",
                                      "max rounds reached: staff ID verification required",
@@ -460,10 +465,22 @@ class ClaimsService:
             "tokenAvailable": status == sm.TOKEN_ISSUED,
             "tokenExpiresAt": iso_utc(claim["tokenExpiresAt"]) if claim.get("tokenExpiresAt") else None,
             "depot": item.get("depot_name"),
+            "reviewReason": self._review_reason(claim) if status == sm.STAFF_REVIEW else None,
             "itemDescription": public_item_description(item.get("public_description"), 80),
             "dateFound": format_found_date(item.get("date")),
             "createdAt": iso_utc(claim["createdAt"]),
         }
+
+    @staticmethod
+    def _review_reason(claim) -> str:
+        """Why a claim is with staff: no_questions | id_check | close_answers."""
+        last = next((h for h in reversed(claim.get("history") or []) if h.get("to") == sm.STAFF_REVIEW), {})
+        reason = last.get("reason") or ""
+        if reason == "insufficient_attributes":
+            return "no_questions"
+        if reason.startswith("id_check"):
+            return "id_check"
+        return "close_answers"
 
     # ── staff ────────────────────────────────────────────────────────────────
     def staff_claim(self, claim_id, depot_phone):

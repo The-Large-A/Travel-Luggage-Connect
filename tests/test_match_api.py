@@ -659,3 +659,15 @@ def test_reports_from_the_single_layer_era_are_stamped_with_their_owner(f2):
     assert f2.db.claims.find_one({"claimId": "legacy-claim"})["passengerSeq"] == 3
     assert backfill_passenger_seqs(f2.db, bookings) == 0                       # idempotent
     assert shared and stranger
+
+
+def test_a_channel_the_passenger_does_not_have_is_skipped_not_failed(f2):
+    """Priya has email but no WhatsApp: the email goes out, and staff do not see a 'failed' row."""
+    f2.match(f2.lost(PRIYA), f2.found(), 0.9)
+    f2.run_jobs()
+    status = {n["channel"]: n["status"] for n in f2.notifications()}
+    assert status[EMAIL] == "sent" and status[WHATSAPP] == "skipped"
+    rows = f2.staff_client().get("/staff/notifications?status=failed").get_json()["notifications"]
+    assert rows == []
+    skipped = f2.staff_client().get("/staff/notifications?status=skipped").get_json()["notifications"]
+    assert "sent by email instead" in skipped[0]["lastError"]

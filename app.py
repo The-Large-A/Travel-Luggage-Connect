@@ -790,7 +790,7 @@ def submit_lost():
         "storageLocation":     storage_location,
         "descriptionOriginal": description_original,   # e.g. the spoken Tamil, kept beside the English
         "descriptionLang":     description_lang,
-        "detailScore":         detail_slots(description)["score"],
+        "detailScore":         detail_slots(description, category)["score"],
         "ticketType":          "pnr",
         "passengerSeq":        (row or {}).get("passengerSeq"),
         "autofilled":          autofilled,

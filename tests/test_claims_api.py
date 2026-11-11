@@ -717,3 +717,12 @@ def test_shared_phone_passengers_cannot_open_or_see_each_others_claim(f3):
     assert meena.get(f"/claims/{claim_id}").status_code == 404
     assert meena.get("/claims").get_json()["claims"] == []
     assert len(senthil.get("/claims").get_json()["claims"]) == 1
+
+
+def test_a_claim_without_questions_says_so(f3):
+    """No questions → staff check the ID; the passenger is not told their 'answers were close'."""
+    item = f3.item(truth={})                                                       # nothing to ask
+    client = f3.login_passenger(ARUN, client=f3.app.test_client())
+    claim_id = f3.open_claim(client, f3.notified_match(ARUN, item=item))
+    view = client.get(f"/claims/{claim_id}").get_json()["claim"]
+    assert view["status"] == "staff_review" and view["reviewReason"] == "no_questions"

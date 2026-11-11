@@ -204,8 +204,10 @@ class IdentityService:
         subject_probe = self.subject_of(kind, digits)
         count, retry = self.limiter.recent_events("id-otp-request", subject_probe, 3600)
         if count >= cfg.otp_max_requests_per_pnr_per_hour:
-            raise AuthError(429, "id_request_limit", "Too many OTP requests for this number. Please try later.",
-                            retry_after=retry)
+            minutes = max(1, -(-int(retry or 60) // 60))
+            raise AuthError(429, "id_request_limit",
+                            f"Too many OTP requests for this number. Please try again in {minutes} minute"
+                            f"{'' if minutes == 1 else 's'}.", retry_after=retry)
         citizen = find_citizen(self.citizens, self.token_key, kind, digits)
         locked = bool(citizen and self._active_lock(citizen.aadhaar_token, LOGIN))
         gate = self.limiter.acquire_cooldown("id-otp-resend", subject_probe, cfg.otp_resend_seconds)

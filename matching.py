@@ -60,7 +60,10 @@ IMAGE_NULL = (0.70, 0.11)         # CLIP ViT-B/32, photo vs photo of a DIFFERENT
 # not "this backpack": the same object scores 0.57-0.96, different ones up to
 # 0.91, so a photo only IDENTIFIES an item when it is near-identical.
 PHOTO_IDENTICAL = 0.92
-CROSS_NULL = (0.21, 0.025)        # CLIP ViT-B/32, description vs photo
+CROSS_NULL = (0.26, 0.035)        # CLIP ViT-B/32, description vs photo of ANOTHER item of the same kind
+# (measured on the Commons photos: own item 0.31, same kind 0.26, other kinds 0.21).
+# Against other kinds it mostly re-counts the category, so it is calibrated
+# against the same kind and capped low.
 SHRINK_K = 4                      # pseudo-observations of the null when calibrating on a block
 
 # Group caps (lower, upper) in bits.
@@ -334,22 +337,37 @@ class Matcher:
 
     # colours ----------------------------------------------------------------
     @staticmethod
-    def _found_colours(found, ff):
-        scanned = [c["name"] for c in ((found.get("attributes") or {}).get("colours") or [])
-                   if isinstance(c, dict) and c.get("share", 0) >= 0.1 and c.get("name") in COLOUR_SET]
-        return tuple(dict.fromkeys(scanned + list(ff.colours)))
+    def _found_colours(found, ff) -> dict:
+        """
+        {colour: share of the item}. A camera scan measured the shares (its notes
+        repeat them as words, which must not count as full-strength colours);
+        colours typed by staff each count fully.
+        """
+        scanned = {}
+        for c in ((found.get("attributes") or {}).get("colours") or []):
+            if isinstance(c, dict) and c.get("name") in COLOUR_SET and float(c.get("share") or 0) >= 0.08:
+                scanned[c["name"]] = scanned.get(c["name"], 0.0) + float(c["share"])
+        return scanned or {c: 1.0 for c in ff.colours}
 
     def _colours(self, ev, found, lf, ff):
-        lc, fc = set(lf.colours), set(self._found_colours(found, ff))
-        if not lc or not fc:
+        lc, shares = set(lf.colours), self._found_colours(found, ff)
+        if not lc or not shares:
             return
+        fc = set(shares)
+        main = max(shares, key=shares.get)
         shared = lc & fc
         if shared:
-            best = max(shared, key=lambda c: -COLOUR_PRIOR.get(c, 0.05))         # the rarest shared colour
-            bits = min(3.5, math.log2(0.85 / COLOUR_PRIOR.get(best, 0.05)))
-            if len(shared) >= 2:
+            def strength(c):                 # rare colours weigh more; a small patch weighs less
+                return min(3.5, math.log2(0.85 / COLOUR_PRIOR.get(c, 0.05))) * min(1.0, shares[c] / 0.35)
+            best = max(shared, key=strength)
+            bits = strength(best)
+            if sum(1 for c in shared if shares[c] >= 0.2) >= 2:
                 bits += 0.5
-            ev.add("description", "colour", bits, f"both {' and '.join(sorted(shared))}")
+            note = f"both {best}" if shares[best] >= 0.35 else \
+                f"both mention {best}, but it is only {round(100 * shares[best])}% of the item"
+            ev.add("description", "colour", bits, note)
+            if main not in lc and shares[main] >= 0.4 and not any(colours_confusable(main, c) for c in lc):
+                ev.add("description", "colour_main", -1.0, f"the item is mostly {main}, which the report does not say")
         elif any(colours_confusable(a, b) for a in lc for b in fc):
             ev.add("description", "colour", -0.5, f"{'/'.join(sorted(lc))} vs {'/'.join(sorted(fc))} (close shades)")
         else:
@@ -467,7 +485,7 @@ class Matcher:
         if raw.get("cross") is not None:
             z = _z(raw["cross"], background.get("cross"), cross_null)
             stats["crossZ"] = round(z, 2)
-            ev.add("image", "description_vs_photo", _z_bits(z, 2.0),
+            ev.add("image", "description_vs_photo", _z_bits(z, 1.5),
                    f"the description fits the item photos (z={z:.1f})" if z >= 1 else
                    "the description does not fit the photos" if z < -1 else "description vs photos: no clear signal")
         return stats

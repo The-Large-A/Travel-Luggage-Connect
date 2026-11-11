@@ -106,7 +106,13 @@
         const { status, data } = await api('GET', `/claims/${ID}`);
         if (status !== 200) { $('status-title').textContent = 'Claim not available'; return; }
         const c = data.claim;
-        const [title, text] = TEXT[c.status] || [c.status, ''];
+        const REVIEW = {
+            no_questions: 'This item has no ownership questions, so a depot officer will check your photo ID and may call you.',
+            id_check: 'Your answers matched. For this kind of item a depot officer also checks your photo ID before handing it over.',
+            close_answers: 'Your answers were close. A depot officer will review your claim and may call you.',
+        };
+        let [title, text] = TEXT[c.status] || [c.status, ''];
+        if (c.status === 'staff_review' && REVIEW[c.reviewReason]) text = REVIEW[c.reviewReason];
         $('status-title').textContent = title;
         $('status-text').textContent = text;
         const p = c.progress;

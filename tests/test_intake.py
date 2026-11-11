@@ -304,6 +304,42 @@ def test_scan_saves_the_item_automatically(intake):
     assert set(d["result"]["questions"]) >= {"brand", "content_item"}
 
 
+def _outside_only(staff):
+    """A scan with outside views only: the camera alone can ask nothing hidden."""
+    draft = new_draft(staff)
+    for a, sh in ((0, 0), (40, 40), (80, -40), (120, 70)):
+        assert send(staff, draft, view(a, shift=sh))["kept"]
+    return draft
+
+
+def test_staff_details_give_an_outside_only_scan_real_questions(intake):
+    app_module, db, svc, staff = intake
+    draft = _outside_only(staff)
+    resp = staff.post(f"/api/intake/drafts/{draft}/finalize", json={
+        "route_id": "R100", "date": _today(), "category": "laptop",
+        "detail_lock_screen": "temple gopuram photo", "detail_distinguishing_mark": "Ganesha sticker on the lid",
+        "detail_colour": "red", "detail_content_item": "charger"})                 # a laptop has no "inside"
+    assert resp.status_code == 202, resp.get_json()
+    d = staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]
+    item = db.found_reports.find_one({"found_id": d["result"]["foundId"]})
+    assert item["category"] == "laptop" and item["questionCategory"] == "laptop"   # staff's word wins
+    assert set(item["private_attributes"]) == {"lock_screen", "distinguishing_mark", "case_colour"}
+    assert d["result"]["questionsReady"] and d["result"]["hiddenQuestion"]
+    assert item["private_attributes"]["case_colour"]["choices"]                       # contrasting options
+    for secret in ("temple", "gopuram", "Ganesha", "charger"):                      # never stored raw anywhere
+        assert secret not in repr(item) and secret not in repr(db.item_drafts.find_one({"draftId": draft}))
+    assert item["attributes"]["questions"]["lock_screen"]["source"] == "staff"
+    assert db.item_drafts.find_one({"draftId": draft}) is not None                  # the check above was real
+
+
+def test_an_outside_only_scan_says_staff_will_check(intake):
+    app_module, db, svc, staff = intake
+    draft = _outside_only(staff)
+    staff.post(f"/api/intake/drafts/{draft}/finalize", json={"route_id": "R100", "date": _today()})
+    r = staff.get(f"/api/intake/drafts/{draft}").get_json()["draft"]["result"]
+    assert not r["questionsReady"] and len(r["questions"]) < 2
+
+
 def test_scan_masks_id_numbers_before_saving(intake, monkeypatch):
     app_module, db, svc, staff = intake
     monkeypatch.setattr(svc, "ocr", FakeOCR("aadhaar 2345 6789 0124 arun"))

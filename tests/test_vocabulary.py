@@ -49,3 +49,36 @@ def test_payload_shape():
     v = vocabulary_payload()
     assert {s["key"] for s in v["storage"]} == {"seat", "overhead", "under_seat", "boot", "front_cabin"}
     assert "american tourister" in v["brands"]
+
+
+# ── item-specific detail prompts (the report form's bubbles) ─────────────────
+from vocabulary import CATEGORY_LABELS, detail_prompts  # noqa: E402
+
+
+@pytest.mark.parametrize("category", sorted(CATEGORY_LABELS))
+def test_every_item_kind_has_its_own_prompts(category):
+    prompts = detail_prompts(category)
+    keys = [p["key"] for p in prompts]
+    assert len(prompts) >= 4 and len(set(keys)) == len(keys) and any(p["core"] for p in prompts)
+    assert all(p["chip"] and p["insert"] and "{" not in p["chip"] for p in prompts)
+
+
+def test_prompts_suit_the_item():
+    keys = {c: {p["key"] for p in detail_prompts(c)} for c in CATEGORY_LABELS}
+    assert "contents" not in keys["phone"] and "contents" not in keys["umbrella"]   # nothing "inside" a phone
+    assert {"case", "serial", "wallpaper"} <= keys["phone"] and {"type", "handle"} <= keys["umbrella"]
+    assert "name" in keys["documents"] and "zip" in keys["bag"]
+    assert "Wildcraft" in detail_prompts("bag")[0]["chip"]                        # brand examples of that kind
+
+
+@pytest.mark.parametrize("category,text,done,score", [
+    ("umbrella", "Black folding umbrella, curved wooden handle, small tear", {"colour", "type", "handle", "marks"}, 100),
+    ("phone", "Samsung phone in a blue cover, cracked corner, IMEI 356789104455667",
+     {"brand", "case", "colour", "marks", "serial"}, 100),
+    ("phone", "my phone", set(), 0),
+    ("documents", "Blue folder with my certificates, name Priya Raman", {"name", "contents", "folder"}, 100),
+    ("bag", "Brand: Pesoma", {"brand"}, 25),                                         # an unknown brand, labelled
+])
+def test_prompt_detection_and_score(category, text, done, score):
+    slots = detail_slots(text, category)
+    assert {k for k, v in slots.items() if k != "score" and v} >= done and slots["score"] == score
