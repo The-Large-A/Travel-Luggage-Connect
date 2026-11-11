@@ -115,6 +115,16 @@ def _content_words():
 _CONTENT_WORDS = _content_words()
 
 
+_PLURAL = {"spectacles", "documents", "clothing"}
+
+
+def _a(category: str) -> str:
+    """'a bag', 'an umbrella', 'spectacles' — for the staff-facing notes."""
+    if category in _PLURAL:
+        return category
+    return ("an " if category[:1] in "aeiou" else "a ") + category
+
+
 def _days_between(a: str, b: str):
     try:
         return (datetime.strptime(b, "%Y-%m-%d") - datetime.strptime(a, "%Y-%m-%d")).days
@@ -309,13 +319,13 @@ class Matcher:
         if not lost_cat or not found_cat:
             return
         if lost_cat == found_cat:
-            ev.add("category", "category", 2.0, f"both are a {lost_cat}")
+            ev.add("category", "category", 2.0, f"both are {_a(lost_cat)}")
         elif frozenset((lost_cat, found_cat)) in COMPATIBLE_CATEGORIES:
             ev.add("category", "category", -1.0, f"{lost_cat} vs {found_cat} (often filed either way)")
         elif conf < 0.6:
             ev.add("category", "category", -1.5, f"{lost_cat} vs {found_cat} (camera was unsure)")
         else:
-            ev.add("category", "category_clash", -6.0, f"a {lost_cat} was lost, a {found_cat} was found",
+            ev.add("category", "category_clash", -6.0, f"{_a(lost_cat)} was lost, {_a(found_cat)} was found",
                    "conflict")
 
     # colours ----------------------------------------------------------------

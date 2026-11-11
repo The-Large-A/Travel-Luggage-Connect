@@ -4,3 +4,6 @@ static/uploads/*
 venv/
 .claude/
 *.pyc
+
+# Downloaded test media (see datasets/media/ATTRIBUTION.md; fetch with tools/fetch_media.py)
+datasets/media/files/

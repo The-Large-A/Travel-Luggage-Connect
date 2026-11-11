@@ -265,6 +265,18 @@ def _protocol(rng, who, raw, attrs, item, dominant):
 
 
 def _simulate(builder, who, n=400, seed=11, hidden_only=False):
+    """Deterministic: the app's CSPRNG shuffles (options, question order) are seeded here too."""
+    import claims.attributes as attributes_mod
+    import claims.options as options_mod
+    saved = attributes_mod._rng, options_mod._rng
+    attributes_mod._rng, options_mod._rng = random.Random(seed + 1), random.Random(seed + 2)
+    try:
+        return _simulate_seeded(builder, who, n, seed, hidden_only)
+    finally:
+        attributes_mod._rng, options_mod._rng = saved
+
+
+def _simulate_seeded(builder, who, n, seed, hidden_only):
     rng = random.Random(seed)
     results = []
     for _ in range(n):
