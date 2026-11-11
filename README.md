@@ -23,7 +23,7 @@ In traditional transport systems, lost items are recorded in manual registers, l
 - [x] **Authentication**: Secure depot-specific login system.
 - [x] **Passenger OTP Login (Feature 1)**: PNR + registered-mobile verification with a one-time password before Lost & Found access (see below).
 - [x] **Automatic Match Notification (Feature 2)**: confidence-routed WhatsApp/email alerts with staff review, retries, fallback and a 7-day hold (see below).
-- [x] **Secure Claims & QR Pickup (Feature 3)**: secret-question ownership check (English/Tamil/Tanglish), gated photo, item locking, signed single-use pickup code + QR, atomic handover with custody log (see below).
+- [x] **Secure Claims & QR Pickup (Feature 3)**: secret-question ownership check (English/Tamil/Tanglish), gated photo, item locking, single-use pickup code + encrypted QR, atomic handover with custody log (see below).
 
 ### **Frontend & UI**
 - [x] **Passenger Portal**: Dynamic forms with real-time stop suggestions based on selected routes.
@@ -347,7 +347,9 @@ ownership, and the depot hands the item over only against a signed, single-use p
 4. **After verification** the found-item photo can be viewed through a 2-minute signed link. The
    item is locked to this claim (a second passenger can never also be approved). The passenger
    receives a **pickup code** (`A7X2-K9P4`) and a **QR**, valid 7 days, with download, print and
-   countdown.
+   countdown. The QR is **encrypted** (`TNSTC2`, AES-256-GCM with its own key): a photo of it reveals
+   no claim, item tag, expiry or code, carries no PNR, and any edit is rejected. Old signed-only
+   `TNSTC1` QRs are refused; the passenger reopens the page for a fresh one, or types the code.
 5. **At the counter** staff scan the passenger's QR (or type the code) and the item's QR tag, check
    photo ID, and hand over. A single all-or-nothing step then:
    - writes the custody log (who, when, depot, staff, claim);

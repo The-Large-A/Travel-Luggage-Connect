@@ -36,7 +36,7 @@ from . import statemachine as sm
 from .attributes import ATTRIBUTES, question_view, select_questions
 from .scoring import BORDERLINE, VERIFIED, answer_passes, decide, trust_score
 from .tokens import (TokenError, code_hash, derive_code, format_code, is_qr_payload, new_nonce,
-                     normalize_code, normalize_tag, sign_payload, verify_payload)
+                     normalize_code, normalize_tag, open_payload, seal_payload)
 from .txn import ConflictAbort, run_atomically
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class ClaimError(Exception):
 PICKUP_REASONS = {
     "malformed": "The code or QR could not be read.",
     "bad_signature": "The QR code has been altered or is not a TNSTC pickup code.",
+    "old_qr": "This is an old-format QR. Ask the passenger to reopen their pickup code, or type the 8-character code.",
     "not_found": "No claim uses this code.",
     "revoked": "This code was replaced by a newer one and is no longer valid.",
     "expired": "This pickup code has expired.",
@@ -99,6 +100,7 @@ class ClaimsService:
         self.lost = db[LOST]
         self.answer_key = derive_key(signing_secret, "tnstc-claim-answers-v1")
         self.token_key = derive_key(signing_secret, "tnstc-pickup-token-v1")
+        self.qr_key = derive_key(signing_secret, "tnstc-pickup-qr-aead-v2")      # AES-256-GCM, QR only
         self.photo_key = derive_key(signing_secret, "tnstc-photo-url-v1")
 
     # ── lookups ──────────────────────────────────────────────────────────────
@@ -419,10 +421,9 @@ class ClaimsService:
 
     def qr_payload(self, claim):
         item = self._item(claim)
-        return sign_payload(self.token_key, {
-            "v": 1, "cid": claim["claimId"], "iid": claim["itemId"], "tag": item.get("qrTagId"),
-            "pnr": claim["pnr"], "exp": int(from_db(claim["tokenExpiresAt"]).timestamp()),
-            "code": self._code(claim)})
+        return seal_payload(self.qr_key, {
+            "cid": claim["claimId"], "iid": claim["itemId"], "tag": item.get("qrTagId"),
+            "exp": int(from_db(claim["tokenExpiresAt"]).timestamp()), "code": self._code(claim)})
 
     @staticmethod
     def qr_svg(data: str) -> str:
@@ -529,13 +530,13 @@ class ClaimsService:
     def _resolve_token(self, token):
         """(claim, code) for a typed code or a scanned QR payload; raises TokenError(reason)."""
         if is_qr_payload(token):
-            payload = verify_payload(self.token_key, token)
+            payload = open_payload(self.qr_key, token)
             code = normalize_code(payload.get("code"))
-            claim = self.claims.find_one({"claimId": payload.get("cid")})
+            cid = payload.get("cid")
+            claim = self.claims.find_one({"claimId": cid}) if isinstance(cid, str) else None
             if not claim:
                 raise TokenError("not_found")
-            if payload.get("iid") != claim["itemId"] or payload.get("pnr") != claim["pnr"] \
-                    or payload.get("tag") != self._item(claim).get("qrTagId"):
+            if payload.get("iid") != claim["itemId"] or payload.get("tag") != self._item(claim).get("qrTagId"):
                 raise TokenError("item_mismatch")
             if claim.get("tokenExpiresAt") is not None \
                     and payload["exp"] != int(from_db(claim["tokenExpiresAt"]).timestamp()):

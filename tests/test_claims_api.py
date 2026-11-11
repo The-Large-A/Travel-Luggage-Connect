@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from claims.tokens import sign_payload
+from claims.tokens import seal_payload
 from conftest import (ARUN, BAG_TRUTH, DEPOT_B, MULTI_SHARED, PRIYA, F3, PNG_BYTES, TEST_SECRET, make_claims_config)
 from passenger_auth.timeutil import from_db
 
@@ -40,7 +40,10 @@ def test_open_answer_approve_token_pickup(f3, sms):
 
     token = f3.token(client, claim_id)
     assert len(token["code"]) == 9 and token["qrSvg"].lstrip().startswith("<svg")
-    assert token["qrPayload"].startswith("TNSTC1.") and token["expiresInSeconds"] == 7 * 86400
+    assert token["qrPayload"].startswith("TNSTC2.") and token["expiresInSeconds"] == 7 * 86400
+    claim = _claim(f3, claim_id)
+    for visible in (claim_id, claim["pnr"], token["code"].replace("-", ""), _item(f3)["qrTagId"]):
+        assert visible not in token["qrPayload"]                     # the QR is encrypted, not readable
     assert client.get(f"/claims/{claim_id}/token.svg").headers["Content-Disposition"].startswith("attachment")
 
     staff = f3.staff_client()
@@ -481,14 +484,21 @@ def test_reused_token(f3):
 def test_forged_or_tampered_qr(f3):
     client, claim_id = f3.approved_claim()
     payload = f3.token(client, claim_id)["qrPayload"]
-    head, body, sig = payload.split(".")
-    assert _verify(f3, f"{head}.{body}.{sig[::-1]}")["reason"] == "bad_signature"
-    assert _verify(f3, f"{head}.{body[:-4]}AAAA.{sig}")["reason"] in ("bad_signature", "malformed")
-    forged = sign_payload(b"attacker-key-000000000000000000000", {"v": 1, "cid": claim_id, "iid": "item-1",
-                                                                  "tag": "TAG-X", "pnr": "T", "exp": 9999999999,
-                                                                  "code": "A7X2K9P4"})
+    head, body = payload.split(".")
+    assert _verify(f3, f"{head}.{body[:-4]}AAAA")["reason"] == "bad_signature"
+    assert _verify(f3, f"{head}.{body[::-1]}")["reason"] in ("bad_signature", "malformed")
+    forged = seal_payload(b"attacker-key-0000000000000000000", {"cid": claim_id, "iid": "item-1",
+                                                                 "tag": "TAG-X", "exp": 9999999999,
+                                                                 "code": "A7X2K9P4"})
     assert _verify(f3, forged)["reason"] == "bad_signature"
-    assert _verify(f3, "TNSTC1.only-two")["reason"] == "malformed"
+    # The pickup-code HMAC key cannot mint QRs: the QR has its own encryption key.
+    c = _claim(f3, claim_id)
+    wrong_key = seal_payload(f3.csvc.token_key, {"cid": claim_id, "iid": "item-1", "tag": _item(f3)["qrTagId"],
+                                                 "exp": int(from_db(c["tokenExpiresAt"]).timestamp()),
+                                                 "code": f3.csvc._code(c)})
+    assert _verify(f3, wrong_key)["reason"] == "bad_signature"
+    old = _verify(f3, "TNSTC1.eyJ2IjoxfQ.c2ln")
+    assert old["reason"] == "old_qr" and "8-character code" in old["message"]
     assert _verify(f3, "ZZZZ-ZZZZ")["reason"] == "not_found"
 
 
@@ -501,9 +511,9 @@ def test_token_for_a_different_item_or_tag(f3):
     assert _verify(f3, token["code"], qrTagId=other["qrTagId"])["reason"] == "tag_mismatch"
     c = _claim(f3, claim_id)
     code = f3.csvc._code(c)
-    retargeted = sign_payload(f3.csvc.token_key, {"v": 1, "cid": claim_id, "iid": "item-2", "tag": other["qrTagId"],
-                                                  "pnr": c["pnr"], "exp": int(from_db(c["tokenExpiresAt"]).timestamp()),
-                                                  "code": code})
+    retargeted = seal_payload(f3.csvc.qr_key, {"cid": claim_id, "iid": "item-2", "tag": other["qrTagId"],
+                                                "exp": int(from_db(c["tokenExpiresAt"]).timestamp()),
+                                                "code": code})
     assert _verify(f3, retargeted)["reason"] == "item_mismatch"
     missing_tag = f3.staff_client().post("/pickup/complete", json={"token": token["code"], "idChecked": True})
     assert _err(missing_tag)["code"] == "tag_required"
@@ -672,7 +682,6 @@ def test_seed_claims_scenarios_and_idempotency(db, clock, tmp_path):
     from match_notify import ensure_match_indexes
     from seed_claims import seed_claims
     from seed_matches import seed_matches
-    from conftest import TEST_SECRET
     ensure_match_indexes(db)
     ensure_claim_indexes(db)
     seed_matches(db, now=clock(), signing_secret=TEST_SECRET)

@@ -1,4 +1,5 @@
 """Unit tests for Feature 3: normalization, fuzzy/synonym scoring, questions, trust, tokens, state machine, txn."""
+import base64
 import json
 import threading
 
@@ -10,8 +11,9 @@ from claims.attributes import ATTRIBUTES, encode_private_attributes, select_ques
 from claims.config import ClaimsConfig
 from claims.normalize import encode_tokens, match_ratio, normalize_text, tokens
 from claims.scoring import BORDERLINE, FAIL, VERIFIED, answer_passes, decide, trust_score
-from claims.tokens import (ALPHABET, TokenError, code_hash, derive_code, format_code, new_nonce, new_tag_id,
-                           normalize_code, normalize_tag, sign_payload, verify_payload)
+from claims.tokens import (ALPHABET, TokenError, code_hash, derive_code, format_code, is_qr_payload,
+                           new_nonce, new_tag_id, normalize_code, normalize_tag, open_payload,
+                           seal_payload)
 from claims.txn import ConflictAbort, Tx, run_atomically, supports_transactions
 from conftest import BAG_TRUTH
 from passenger_auth.config import ConfigError
@@ -199,22 +201,76 @@ def test_code_hash_is_keyed():
     assert "A7X2K9P4" not in code_hash(KEY, "A7X2K9P4")
 
 
-def test_signed_payload_roundtrip_and_tamper_detection():
-    payload = {"v": 1, "cid": "c1", "iid": "i1", "tag": "TAG-ABCDEFGH", "pnr": "T26100101", "exp": 2000000000,
-               "code": "A7X2K9P4"}
-    signed = sign_payload(KEY, payload)
-    assert verify_payload(KEY, signed) == payload
-    head, body, sig = signed.split(".")
-    import base64
-    forged = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    forged["iid"] = "i2"
-    forged_body = base64.urlsafe_b64encode(json.dumps(forged).encode()).rstrip(b"=").decode()
-    for bad, reason in [(f"{head}.{forged_body}.{sig}", "bad_signature"), (f"{head}.{body}.{sig[:-2]}AA", "bad_signature"),
-                        ("TNSTC2." + body + "." + sig, "malformed"), ("garbage", "malformed"),
-                        (sign_payload(b"z" * 32, payload), "bad_signature"), ("A" * 5000, "malformed")]:
+QR_PAYLOAD = {"cid": "3f9a0c1d2e4b4c6f8a1b2c3d4e5f6a7b", "iid": "item-1", "tag": "TAG-ABCDEFGH",
+              "exp": 2000000000, "code": "A7X2K9P4"}
+
+
+def _qr_bytes(qr):
+    body = qr.split(".", 1)[1]
+    return base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+
+
+def test_qr_roundtrip():
+    qr = seal_payload(KEY, QR_PAYLOAD)
+    assert qr.startswith("TNSTC2.") and qr.count(".") == 1
+    assert open_payload(KEY, qr) == {**QR_PAYLOAD, "v": 2}
+    assert is_qr_payload(qr) and is_qr_payload("  " + qr + "\n")
+
+
+def test_qr_is_encrypted_not_just_signed():
+    """A photo of the QR must reveal nothing: no claim id, item, tag, expiry or pickup code."""
+    qr = seal_payload(KEY, QR_PAYLOAD)
+    raw = _qr_bytes(qr)
+    for secret in ("A7X2K9P4", "TAG-ABCDEFGH", "item-1", "3f9a0c1d", "2000000000", "cid", "code"):
+        assert secret.encode() not in raw and secret not in qr
+    with pytest.raises(ValueError):
+        json.loads(raw)                                              # not JSON, not base64-of-JSON
+    # Same payload twice: different ciphertexts (random 96-bit nonce), both valid.
+    other = seal_payload(KEY, QR_PAYLOAD)
+    assert other != qr and open_payload(KEY, other) == open_payload(KEY, qr)
+    assert len({seal_payload(KEY, QR_PAYLOAD)[7:23] for _ in range(50)}) == 50   # nonces never repeat
+
+
+def test_qr_tamper_wrong_key_and_old_format_are_refused():
+    qr = seal_payload(KEY, QR_PAYLOAD)
+    raw = bytearray(_qr_bytes(qr))
+    for i in (0, 11, 12, len(raw) // 2, len(raw) - 1):              # nonce, ciphertext, GCM tag
+        flipped = bytearray(raw)
+        flipped[i] ^= 0x01
+        bad = "TNSTC2." + base64.urlsafe_b64encode(bytes(flipped)).rstrip(b"=").decode()
         with pytest.raises(TokenError) as e:
-            verify_payload(KEY, bad)
-        assert e.value.reason == reason
+            open_payload(KEY, bad)
+        assert e.value.reason == "bad_signature"
+    cases = [(seal_payload(b"z" * 32, QR_PAYLOAD), "bad_signature"),            # someone else's key
+             ("TNSTC1.eyJ2IjoxfQ.c2ln", "old_qr"),                               # signed-but-readable v1
+             ("TNSTC2.", "malformed"), ("TNSTC2.AAAA", "malformed"), ("TNSTC2.a.b", "malformed"),
+             ("TNSTC3." + qr[7:], "malformed"), ("garbage", "malformed"), ("A" * 5000, "malformed"),
+             (None, "malformed"), ("TNSTC2.!!!!", "malformed")]
+    for bad, reason in cases:
+        with pytest.raises(TokenError) as e:
+            open_payload(KEY, bad)
+        assert e.value.reason == reason, bad
+    with pytest.raises(ValueError):
+        seal_payload(b"short", QR_PAYLOAD)
+
+
+def test_qr_payload_must_be_well_formed_after_decryption():
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = b"\x01" * 12
+    for plain in (b"not json", b"[1,2]", json.dumps({"v": 1, "exp": 1}).encode(),
+                  json.dumps({"v": 2, "exp": "soon"}).encode()):
+        qr = "TNSTC2." + base64.urlsafe_b64encode(
+            nonce + AESGCM(KEY).encrypt(nonce, plain, b"TNSTC2")).rstrip(b"=").decode()
+        with pytest.raises(TokenError) as e:
+            open_payload(KEY, qr)
+        assert e.value.reason == "malformed"
+
+
+def test_qr_still_scans_at_a_sensible_size():
+    import segno
+    qr = seal_payload(KEY, {**QR_PAYLOAD, "tag": "TAG-" + "Z" * 8})
+    assert len(qr) < 250
+    assert segno.make(qr, error="m").version <= 10                   # phone cameras read this easily
 
 
 def test_tag_ids():

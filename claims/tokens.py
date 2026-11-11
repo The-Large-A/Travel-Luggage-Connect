@@ -8,8 +8,12 @@ can therefore re-display the code to its owner, but a database dump alone cannot
 produce a valid code. Reissuing draws a new nonce, which revokes the old code
 and every QR that embeds it.
 
-QR payload: "TNSTC1.<base64url(json)>.<base64url(hmac)>" with
-{v, cid (claimId), iid (itemId), tag (qrTagId), pnr, exp (epoch seconds), code}.
+QR payload (v2): "TNSTC2.<base64url(nonce || AES-256-GCM(json) || tag)>".
+The JSON {v, cid (claimId), iid (itemId), tag (qrTagId), exp (epoch seconds),
+code} is ENCRYPTED and authenticated, so a photo of the QR reveals nothing:
+not the claim, the item tag, the expiry or the pickup code. The PNR is not in
+it at all. The key is its own purpose-derived subkey; the prefix is GCM
+associated data. v1 ("TNSTC1.", signed but readable) is refused as "old_qr".
 """
 import base64
 import hashlib
@@ -18,9 +22,15 @@ import json
 import re
 import secrets
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"     # 32 symbols: no 0/O, no 1/I
 CODE_LEN = 8
-PREFIX = "TNSTC1"
+PREFIX = "TNSTC2"
+OLD_PREFIX = "TNSTC1"                            # signed-but-readable QR from before v2
+_NONCE = 12
+_MAX_QR = 1024
 _CODE_RE = re.compile(rf"[{ALPHABET}]{{{CODE_LEN}}}")
 TAG_PREFIX = "TAG-"
 
@@ -65,33 +75,46 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def sign_payload(key: bytes, payload: dict) -> str:
-    body = _b64(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
-    sig = _b64(hmac.new(key, f"{PREFIX}.{body}".encode(), hashlib.sha256).digest())
-    return f"{PREFIX}.{body}.{sig}"
+def seal_payload(key: bytes, payload: dict) -> str:
+    """Encrypt + authenticate the QR payload (AES-256-GCM, random 96-bit nonce)."""
+    if len(key) != 32:
+        raise ValueError("the QR key must be 32 bytes")
+    plain = json.dumps({**payload, "v": 2}, separators=(",", ":"), sort_keys=True).encode()
+    nonce = secrets.token_bytes(_NONCE)
+    return f"{PREFIX}.{_b64(nonce + AESGCM(key).encrypt(nonce, plain, PREFIX.encode()))}"
 
 
-def verify_payload(key: bytes, value) -> dict:
-    """Signature-checked payload. Raises TokenError('malformed' | 'bad_signature')."""
-    if not isinstance(value, str) or len(value) > 1024:
+def open_payload(key: bytes, value) -> dict:
+    """Decrypted payload. Raises TokenError('malformed' | 'bad_signature' | 'old_qr')."""
+    if not isinstance(value, str) or len(value) > _MAX_QR:
         raise TokenError("malformed")
-    parts = value.strip().split(".")
-    if len(parts) != 3 or parts[0] != PREFIX:
+    text = value.strip()
+    if text.startswith(OLD_PREFIX + "."):
+        raise TokenError("old_qr")
+    head, _, body = text.partition(".")
+    if head != PREFIX or not body or "." in body:
         raise TokenError("malformed")
     try:
-        expected = hmac.new(key, f"{PREFIX}.{parts[1]}".encode(), hashlib.sha256).digest()
-        if not hmac.compare_digest(expected, _unb64(parts[2])):
-            raise TokenError("bad_signature")
-        payload = json.loads(_unb64(parts[1]))
+        blob = _unb64(body)
     except (ValueError, TypeError):
         raise TokenError("malformed")
-    if not isinstance(payload, dict) or payload.get("v") != 1 or not isinstance(payload.get("exp"), int):
+    if len(blob) < _NONCE + 16 + 2:
+        raise TokenError("malformed")
+    try:
+        plain = AESGCM(key).decrypt(blob[:_NONCE], blob[_NONCE:], PREFIX.encode())
+    except InvalidTag:
+        raise TokenError("bad_signature")              # altered, or not sealed with our key
+    try:
+        payload = json.loads(plain)
+    except ValueError:
+        raise TokenError("malformed")
+    if not isinstance(payload, dict) or payload.get("v") != 2 or not isinstance(payload.get("exp"), int):
         raise TokenError("malformed")
     return payload
 
 
 def is_qr_payload(value) -> bool:
-    return isinstance(value, str) and value.strip().startswith(PREFIX + ".")
+    return isinstance(value, str) and value.strip().startswith((PREFIX + ".", OLD_PREFIX + "."))
 
 
 def new_tag_id() -> str:
