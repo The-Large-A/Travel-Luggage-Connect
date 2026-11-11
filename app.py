@@ -22,10 +22,8 @@ load_dotenv()
 
 import groq
 
-from similarity import (
-    TextSimilarity, ImageSimilarity, UnifiedScorer, OCRExtractor,
-    ocr_match_score, structured_match_score
-)
+from similarity import TextSimilarity, ImageSimilarity, OCRExtractor
+import matching
 from notifications import notification_service
 import transport_schema as T
 from passenger_auth import init_passenger_auth, require_passenger
@@ -142,6 +140,7 @@ logger.info("Initialising AI models...")
 text_sim  = TextSimilarity()
 image_sim = ImageSimilarity(db=db)
 ocr_ext   = OCRExtractor()
+matcher   = matching.Matcher(text_sim, image_sim, image_root="static")
 logger.info(f"CLIP available: {image_sim.available}")
 
 # File Upload
@@ -384,14 +383,11 @@ def _window_dates(date_str: str, days: int = 7, forward: bool = False) -> list:
     return dates
 
 
-def score_lost_found(found_report: dict, lost: dict, depot: dict):
+def luggage_feasible(found_report: dict, lost: dict, depot: dict) -> bool:
     """
-    Score a single (found, lost) pair — the shared core used by BOTH matching
-    directions. Returns the UnifiedScorer breakdown dict, or None when the
-    directional luggage filter rejects the pair (or the route is unknown).
-
-    Signals: text (descriptions), image (CLIP), OCR (text read off the item,
-    cached on the found doc), and structured (exact trip / bus / adjacent seat).
+    Blocking rule shared by both matching directions: False when the item
+    cannot be at this depot (the bus had not reached the depot's stop after the
+    passenger got off) or the route is unknown.
     """
     depot = depot or {}
     transport_route = get_route(found_report.get("route_id"))
@@ -407,60 +403,36 @@ def score_lost_found(found_report: dict, lost: dict, depot: dict):
         if (b and a and depot_stop_id
                 and b in seq_ids and a in seq_ids and depot_stop_id in seq_ids):
             if not luggage_could_be_at_depot(seq_ids, b, a, depot_stop_id):
-                return None
-    else:
-        # Legacy fallback: hardcoded ROUTES + name-based directional logic.
-        legacy_route = get_route_by_id(found_report.get("route_id", ""))
-        if not legacy_route:
-            return None
-        names = get_stop_names(legacy_route)
-        if not luggage_could_be_at_depot(
-            names, lost.get("source", ""), lost.get("destination", ""), depot.get("stop", "")
-        ):
-            return None
+                return False
+        return True
+    # Legacy fallback: hardcoded ROUTES + name-based directional logic.
+    legacy_route = get_route_by_id(found_report.get("route_id", ""))
+    if not legacy_route:
+        return False
+    names = get_stop_names(legacy_route)
+    return luggage_could_be_at_depot(
+        names, lost.get("source", ""), lost.get("destination", ""), depot.get("stop", ""))
 
-    # Text similarity
-    text_score = text_sim.similarity(
-        lost.get("description", ""), found_report.get("notes", "")
-    )
 
-    # Image similarity — a smart-intake item has several keyframes; the best view wins.
-    image_score = 0.0
-    found_imgs = [os.path.join("static", p) for p in (
-        found_report.get("images") or ([found_report["image_path"]] if found_report.get("image_path") else []))]
-    found_img = found_imgs[0] if found_imgs else None
-    if found_imgs and lost.get("image_path"):
-        lost_img = os.path.join("static", lost["image_path"])
-        image_score = max(image_sim.similarity(f, lost_img) for f in found_imgs[:8])
+def _with_ocr(found_report: dict) -> dict:
+    """OCR text is cached on the found doc; only a legacy item without it is read live."""
+    if found_report.get("ocr_text") is None:
+        imgs = found_report.get("images") or ([found_report["image_path"]] if found_report.get("image_path") else [])
+        text = ocr_ext.extract_text(os.path.join("static", imgs[0])) if imgs else ""
+        found_report = {**found_report, "ocr_text": text or ""}
+    return found_report
 
-    # OCR — reuse the text cached on the found doc; only extract live if a legacy
-    # found report has no cached ocr_text.
-    ocr_text = found_report.get("ocr_text")
-    if ocr_text is None and found_img:
-        ocr_text = ocr_ext.extract_text(found_img)
-    ocr_score = ocr_match_score(
-        lost.get("name", ""), lost.get("description", ""), ocr_text or ""
-    )
 
-    # Structured (travel-record) score — exact trip / bus / adjacent seat.
-    structured_score = structured_match_score(
-        found_report.get("trip_id"), lost.get("trip_id"),
-        found_report.get("bus_id"),  lost.get("bus_id"),
-        found_report.get("found_seat_area"), lost.get("seat_no"),
-    )
-
-    score = UnifiedScorer.compute(
-        text_score, image_score, route_score=1.0,
-        ocr_score=ocr_score, structured_score=structured_score
-    )
-    # Phase 2: both sides now pick from the same category list. A clear
-    # disagreement (wallet vs laptop) halves the score; "other" never penalises.
-    lc, fc = lost.get("category"), found_report.get("category")
-    if lc and fc and "other" not in (lc, fc) and lc != fc:
-        score["final"] = round(score["final"] * 0.5, 4)
-        score["is_match"] = score["final"] >= UnifiedScorer.MATCH_THRESHOLD
-        score["categoryMismatch"] = True
-    return score
+def score_lost_found(found_report: dict, lost: dict, depot: dict):
+    """
+    Score a single (found, lost) pair with the v2 evidence matcher (matching.py),
+    or None when the luggage filter rules the pair out. Single pairs are
+    calibrated against the model's null distribution; the matching passes below
+    score whole blocks, which calibrates against the other candidates too.
+    """
+    if not luggage_feasible(found_report, lost, depot):
+        return None
+    return matcher.score(_with_ocr(found_report), lost)
 
 
 def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
@@ -475,51 +447,80 @@ def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
     return is_new
 
 
-def compute_and_save_matches(found_report: dict, depot: dict) -> int:
-    """
-    FOUND-triggered matching: score a new found report against pending lost
-    reports on the SAME route within the date window. Returns qualifying count.
-    """
-    valid_dates = _window_dates(found_report.get("date", ""), forward=False)
-    pending_lost = lost_collection.find({
-        "route_id": found_report.get("route_id"),
-        "date":     {"$in": valid_dates},
-        "status":   {"$ne": "resolved"}
-    })
+def _open_lost_near(route_id, date, forward: bool) -> list:
+    return list(lost_collection.find({
+        "route_id": route_id, "date": {"$in": _window_dates(date or "", forward=forward)},
+        "status": {"$nin": ["resolved", "cancelled"]}}))
 
+
+def _found_near(route_id, date, forward: bool) -> list:
+    return list(found_collection.find({
+        "route_id": route_id, "date": {"$in": _window_dates(date or "", forward=forward)}}))
+
+
+def _save_block(block, pairs_of) -> int:
+    """Persist every pair of a scored block worth recording; returns how many."""
     n = 0
-    for lost in pending_lost:
-        score = score_lost_found(found_report, lost, depot)
-        if score and score["is_match"]:
+    for cand, score in block:
+        found_report, lost = pairs_of(cand)
+        if matching.route(score, match_notifier.config.auto_notify_min,
+                          match_notifier.config.review_min) is not None:
             _save_match(found_report, lost, score)
             n += 1
     return n
 
 
+def compute_and_save_matches(found_report: dict, depot: dict) -> int:
+    """
+    FOUND-triggered matching: score a new found item against the open lost
+    reports on the SAME route within the date window, as ONE block (so the
+    similarities are calibrated against each other and the best candidate must
+    clearly lead to be auto-notified). Returns how many pairs were recorded.
+    """
+    found_report = _with_ocr(found_report)
+    candidates = [lo for lo in _open_lost_near(found_report.get("route_id"), found_report.get("date"), False)
+                  if luggage_feasible(found_report, lo, depot)]
+    if not candidates:
+        return 0
+    block = matcher.score_block(found_report, candidates, query_is_found=True)
+    top_lost, top = block[0]
+    if top["autoEligible"]:
+        # Mutual best: is another found item just as likely to be this passenger's?
+        rivals = [_with_ocr(f) for f in _found_near(top_lost.get("route_id"), top_lost.get("date"), True)
+                  if f.get("found_id") != found_report.get("found_id") and f.get("status") in (None, "open")]
+        if matching.is_contested(matcher, top_lost, found_report, rivals, anchor_is_found=False):
+            top["autoEligible"] = False
+            top["blockers"].append("another found item is almost as likely to be this passenger's")
+    return _save_block(block, lambda lost: (found_report, lost))
+
+
 def compute_matches_for_lost(lost_report: dict) -> int:
     """
     LOST-triggered matching (symmetric counterpart): score a new lost report
-    against already-logged found reports on the SAME route within the date
-    window. This closes the gap where a passenger reporting AFTER the depot had
-    already logged the item would otherwise never be matched.
+    against the found items already logged on the SAME route within the date
+    window, as one block. Closes the gap where a passenger reporting AFTER the
+    depot logged the item would otherwise never be matched.
     """
-    valid_dates = _window_dates(lost_report.get("date", ""), forward=True)
-    candidate_found = found_collection.find({
-        "route_id": lost_report.get("route_id"),
-        "date":     {"$in": valid_dates},
-    })
-
-    n = 0
     depot_cache = {}
-    for found in candidate_found:
+
+    def depot_of(found):
         phone = found.get("depot_phone")
         if phone not in depot_cache:
             depot_cache[phone] = depots_collection.find_one({"phone": phone}) or {}
-        score = score_lost_found(found, lost_report, depot_cache[phone])
-        if score and score["is_match"]:
-            _save_match(found, lost_report, score)
-            n += 1
-    return n
+        return depot_cache[phone]
+    candidates = [_with_ocr(f) for f in _found_near(lost_report.get("route_id"), lost_report.get("date"), True)
+                  if luggage_feasible(f, lost_report, depot_of(f))]
+    if not candidates:
+        return 0
+    block = matcher.score_block(lost_report, candidates, query_is_found=False)
+    top_found, top = block[0]
+    if top["autoEligible"]:
+        rivals = [lo for lo in _open_lost_near(top_found.get("route_id"), top_found.get("date"), False)
+                  if lo.get("request_id") != lost_report.get("request_id")]
+        if matching.is_contested(matcher, top_found, lost_report, rivals, anchor_is_found=True):
+            top["autoEligible"] = False
+            top["blockers"].append("another passenger's report is almost as likely")
+    return _save_block(block, lambda found: (found, lost_report))
 
 
 def get_matches_for_depot(depot_phone: str) -> list:

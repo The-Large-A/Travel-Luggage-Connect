@@ -40,7 +40,7 @@ OBJECTS = {
     "keys": ["keys", "key", "saavi", "chaavi", "சாவி", "keychain"],
     "tiffin": ["tiffin", "lunchbox", "dabba", "tiffinbox", "டிபன்"],
     "umbrella": ["umbrella", "kudai", "குடை"],
-    "book": ["book", "books", "puthagam", "puthakam", "புத்தகம்", "notebook"],
+    "book": ["book", "books", "puthagam", "puthakam", "புத்தகம்", "notebook", "notebooks"],
     "bottle": ["bottle", "flask", "thannibottle", "பாட்டில்"],
     "charger": ["charger", "adapter", "charging"],
     "earphones": ["earphones", "earphone", "headphones", "headset", "earbuds", "airpods"],
@@ -50,6 +50,12 @@ OBJECTS = {
     "medicine": ["medicine", "medicines", "tablets", "marundhu", "marunthu", "மருந்து"],
     "laptop": ["laptop", "notebookpc"],
     "photo": ["photo", "photograph", "pic", "picture", "padam", "படம்"],
+    "card": ["card", "cards", "atmcard", "debitcard", "creditcard", "idcard", "smartcard"],
+    "ticket": ["ticket", "tickets", "buspass"],
+    "bill": ["bill", "bills", "receipt", "receipts"],
+    "certificate": ["certificate", "certificates", "marksheet", "marksheets"],
+    "passport": ["passport"],
+    "powerbank": ["powerbank"],
     "sticker": ["sticker", "stickers", "label"],
     "scratch": ["scratch", "scratches", "scratched", "keeral", "கீறல்"],
 }
@@ -58,6 +64,9 @@ PHRASES = {
     "lunch box": "tiffin", "tiffin box": "tiffin", "water bottle": "bottle", "thanni bottle": "bottle",
     "power bank": "powerbank", "ear phones": "earphones", "head phones": "earphones",
     "cell phone": "phone", "mobile phone": "phone", "note book": "book",
+    "atm card": "atmcard", "debit card": "debitcard", "credit card": "creditcard", "id card": "idcard",
+    "aadhaar card": "idcard", "aadhar card": "idcard", "smart card": "smartcard", "bus ticket": "ticket",
+    "bus pass": "buspass", "mark sheet": "marksheet",
 }
 
 STOPWORDS = {

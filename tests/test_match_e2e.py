@@ -141,7 +141,7 @@ def test_end_to_end_lost_then_found_then_notified_then_viewed(e2e):
 
     # 1. Passenger verifies with OTP (Feature 1) and files a lost report.
     passenger = _login(flask_app.test_client(), sms, ARUN)
-    resp = _report_lost(passenger, "black backpack with laptop", _today())
+    resp = _report_lost(passenger, "black Wildcraft backpack with my Dell laptop and charger", _today())
     assert resp.status_code == 302
     lost = db.lost_reports.find_one()
     assert lost["ownerPnr"] == "T26100101" and lost["ownerPhone"] == "+919876543210"
@@ -150,10 +150,14 @@ def test_end_to_end_lost_then_found_then_notified_then_viewed(e2e):
     # 2. Depot staff log the found item; the existing matcher runs synchronously.
     depot = flask_app.test_client()
     assert depot.post("/depot/login", data={"phone": "9000000004", "password": "pass123"}).status_code == 302
-    assert _log_found(depot, "black backpack with laptop", "Black backpack", _today()).status_code == 302
+    assert _log_found(depot, "Black Wildcraft backpack, Dell laptop and charger inside", "Black backpack",
+                      _today()).status_code == 302
     match = db.matches.find_one()
-    assert match["reportId"] == lost["request_id"] and match["confidence"] == 1.0   # same trip = proof
+    assert match["reportId"] == lost["request_id"] and match["confidence"] >= 0.95
     assert match["status"] == "auto_approved"
+    score = match["score"]                       # v2: evidence in bits, with an identifying signal
+    assert score["version"] == 2 and "brand" in score["identifying"] and not score["conflicts"]
+    assert {"same_trip", "brand", "colour"} <= {e["signal"] for e in score["evidence"]}
     assert db.message_log.count_documents({}) == 0             # the request path never sends
 
     # 3. Background worker delivers the mock WhatsApp.
@@ -171,7 +175,7 @@ def test_end_to_end_lost_then_found_then_notified_then_viewed(e2e):
     page = passenger.get(link)
     assert page.status_code == 200 and b"Black backpack" in page.data
     view = passenger.get(f"/matches/{match['_id']}").get_json()["match"]
-    assert view["state"] == "active" and view["foundAt"] == "Salem Depot" and view["confidencePercent"] == 100
+    assert view["state"] == "active" and view["foundAt"] == "Salem Depot" and view["confidencePercent"] >= 95
     assert passenger.get(f"/passenger/matches/{match['_id']}").status_code == 200
     assert len(passenger.get("/notifications").get_json()["notifications"]) == 1
 
@@ -184,9 +188,9 @@ def test_found_first_then_late_lost_report_still_matches(e2e):
     flask_app = app_module.app
     depot = flask_app.test_client()
     depot.post("/depot/login", data={"phone": "9000000004", "password": "pass123"})
-    _log_found(depot, "blue steel water bottle", "Steel bottle", _today())
+    _log_found(depot, "Blue Milton steel water bottle, CSK sticker", "Steel bottle", _today())
     passenger = _login(flask_app.test_client(), sms, PRIYA)
-    _report_lost(passenger, "blue steel water bottle", _today())
+    _report_lost(passenger, "blue Milton steel water bottle with a CSK sticker", _today())
     match = db.matches.find_one()
     assert match and match["status"] == "auto_approved"
     app_module.match_notifier.process_due_notifications("e2e")
@@ -200,17 +204,20 @@ def test_review_band_match_waits_for_staff_approval(e2e):
     _report_lost(passenger, "black leather wallet brown strap", _today())
     depot = flask_app.test_client()
     depot.post("/depot/login", data={"phone": "9000000004", "password": "pass123"})
-    # No trip given → no structured boost; partial word overlap lands in the review band.
+    # A close but GENERIC description: likely the same wallet, but nothing identifies it
+    # (no brand, serial, name or contents), so staff decide; nothing is sent first.
     resp = depot.post("/depot/found", data={"route_id": "R100", "date": _today(),
                                             "notes": "black leather wallet brown", "public_description": "Wallet"})
     assert resp.status_code == 302
     match = db.matches.find_one()
-    assert 0.60 <= match["confidence"] < 0.85 and match["status"] == "pending_staff_review"
+    assert match["confidence"] >= 0.60 and match["status"] == "pending_staff_review"
+    assert not match["score"]["autoEligible"] and match["score"]["identifying"] == []
+    assert any("identifying" in b for b in match["score"]["blockers"])
     app_module.match_notifier.process_due_notifications("e2e")
     assert db.message_log.count_documents({}) == 0
     assert passenger.get(f"/matches/{match['_id']}").status_code == 404
     queue = depot.get("/staff/matches?status=staff_review").get_json()["matches"]
-    assert len(queue) == 1
+    assert len(queue) == 1 and queue[0]["reasons"] and queue[0]["blockers"]       # staff see why
     assert depot.post(f"/staff/matches/{match['_id']}/approve").status_code == 200
     app_module.match_notifier.process_due_notifications("e2e")
     assert db.message_log.count_documents({"channel": "whatsapp"}) == 1

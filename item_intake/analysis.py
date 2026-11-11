@@ -41,7 +41,9 @@ CONTENT_PROMPTS = {
     "tiffin": "a steel tiffin box", "umbrella": "a folded umbrella", "book": "books or notebooks",
     "bottle": "a water bottle", "charger": "a phone or laptop charger", "earphones": "earphones",
     "money": "cash", "towel": "a towel", "clothes": "folded clothes", "medicine": "medicine strips",
-    "laptop": "a laptop", "photo": "a photograph",
+    "laptop": "a laptop", "photo": "a photograph", "card": "a bank or ID card", "ticket": "a bus ticket",
+    "bill": "paper bills or receipts", "certificate": "certificates or mark sheets", "passport": "a passport",
+    "powerbank": "a power bank",
 }
 assert set(CONTENT_PROMPTS) == set(CONTENTS)
 MARK_FEATURES = ("keychain", "name tag", "sticker", "patch")
@@ -87,14 +89,17 @@ def analyse(frames: dict, classifier, ocr, captioner, progress=lambda pct, stage
 
     # 2. What it is (CLIP zero-shot over the shared vocabulary).
     progress(35, "Recognising the item")
-    category, cat_conf = "other", 0.0
+    category, cat_conf, margin = "other", 0.0, 0.0
     if clip_ok:
         res = classifier.zero_shot(outside, list(CATEGORY_PROMPTS.values()), template="a photo of {}") or {}
         if res:
+            ranked = sorted(res.values(), reverse=True)
             best = max(res, key=res.get)
             category = next(k for k, v in CATEGORY_PROMPTS.items() if v == best)
             cat_conf = res[best]
+            margin = ranked[0] - (ranked[1] if len(ranked) > 1 else 0.0)
     facts["category"], facts["categoryConfidence"] = category, round(cat_conf, 3)
+    facts["categoryMargin"] = round(margin, 3)          # gap to the runner-up (the question gate needs it)
     noun = NOUNS[category]
     facts["noun"] = noun
 

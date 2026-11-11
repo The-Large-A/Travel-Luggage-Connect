@@ -230,17 +230,20 @@ def test_translate_without_a_key_keeps_the_original(p2):
 
 
 # ── category-aware scoring and multi-photo items ─────────────────────────────
-def test_category_mismatch_halves_the_score(p2):
+def test_category_clash_is_a_contradiction_and_other_is_neutral(p2):
     app_module, db, sms = p2
     depot = db.depots.find_one({"name": "Salem Depot"})
     lost = {"route_id": "R100", "boarding_stop_id": "S1", "alighting_stop_id": "S2", "trip_id": "T1",
             "bus_id": "B1", "seat_no": 12, "description": "black dell laptop", "name": "Arun"}
     found = {"route_id": "R100", "trip_id": "T1", "bus_id": "B1", "notes": "black dell laptop", "ocr_text": ""}
     same = app_module.score_lost_found({**found, "category": "laptop"}, {**lost, "category": "laptop"}, depot)
-    clash = app_module.score_lost_found({**found, "category": "wallet"}, {**lost, "category": "laptop"}, depot)
+    clash = app_module.score_lost_found({**found, "category": "umbrella"}, {**lost, "category": "laptop"}, depot)
     other = app_module.score_lost_found({**found, "category": "other"}, {**lost, "category": "laptop"}, depot)
-    assert clash["final"] == pytest.approx(same["final"] * 0.5, abs=1e-3) and clash["categoryMismatch"]
-    assert other["final"] == same["final"]
+    # +2 agreement → -6 contradiction, and Dell is no longer the item's own brand (Dell makes no umbrellas)
+    assert same["bits"] - clash["bits"] >= 8.0
+    assert clash["categoryMismatch"] and "category_clash" in clash["conflicts"]
+    assert not other["categoryMismatch"] and other["bits"] >= clash["bits"] + 6     # "other": text says laptop
+    assert same["final"] == other["final"] > clash["final"]     # "other" + notes saying laptop = laptop
 
 
 def test_best_keyframe_wins_image_score(p2, monkeypatch):
@@ -248,6 +251,7 @@ def test_best_keyframe_wins_image_score(p2, monkeypatch):
     scores = {"static/a.jpg": 0.2, "static/b.jpg": 0.9}
     monkeypatch.setattr(app_module.image_sim, "similarity",
                         lambda f, l: scores.get(f.replace("\\", "/"), 0.0))
+    monkeypatch.setattr(app_module.image_sim, "available", True, raising=False)
     depot = db.depots.find_one({"name": "Salem Depot"})
     lost = {"route_id": "R100", "boarding_stop_id": "S1", "alighting_stop_id": "S2", "description": "x",
             "image_path": "uploads/l.jpg"}

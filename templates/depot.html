@@ -337,6 +337,20 @@
                                         <span class="text-amber-800">Final: {{ "%.2f"|format(lost.score.final) }}</span>
                                     </span>
                                 </div>
+                                {% if lost.score.evidence %}
+                                <ul class="mt-1.5 space-y-0.5 text-[11px] leading-snug" aria-label="Why the matcher paired these">
+                                    {% for e in lost.score.evidence if (e.bits|abs) >= 1 or e.kind == 'identifying' %}
+                                    {% if loop.index <= 5 %}
+                                    <li class="{{ 'text-red-700' if e.kind == 'conflict' else ('text-green-700 font-semibold' if e.kind == 'identifying' else 'text-slate-600') }}">
+                                        {{ '✗' if e.kind == 'conflict' else ('★' if e.kind == 'identifying' else ('+' if e.bits > 0 else '−')) }} {{ e.note }}
+                                    </li>
+                                    {% endif %}
+                                    {% endfor %}
+                                </ul>
+                                {% if lost.score.blockers %}
+                                <p class="mt-1 text-[11px] text-amber-800">Not sent automatically: {{ lost.score.blockers|join('; ') }}.</p>
+                                {% endif %}
+                                {% endif %}
 
                                 {% if lost.status == 'resolved' %}
                                 <div class="mt-2 text-[10px] font-bold text-green-600 uppercase tracking-wide">✅ Resolved</div>

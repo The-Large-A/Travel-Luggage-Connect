@@ -4,10 +4,15 @@ similarity.py — AI Matching Engine
 This module handles ALL similarity logic for the recovery system.
 It is imported by app.py and keeps the main app clean and readable.
 
-Three components:
+Components:
   1. TextSimilarity   — Sentence-BERT (fast, cached in RAM)
-  2. ImageSimilarity  — CLIP (optional; cached in MongoDB)
-  3. UnifiedScorer    — Combines scores: 0.5*text + 0.3*image + 0.2*route
+  2. ImageSimilarity  — CLIP (optional; cached in MongoDB): photo↔photo,
+                        description↔photo, and zero-shot labels for intake
+  3. OCRExtractor     — OCR.Space
+
+How these raw similarities become a match decision is matching.py (v2,
+evidence in bits). The old fixed-weight UnifiedScorer is kept only as the
+benchmark baseline in tools/legacy_matcher_v1.py.
 """
 
 import hashlib
@@ -187,6 +192,41 @@ class ImageSimilarity:
         score = cosine_similarity([emb_a], [emb_b])[0][0]
         return float(score)
 
+    def text_to_images(self, text: str, image_paths) -> Optional[float]:
+        """
+        Cross-modal: CLIP cosine between a passenger's description and the best
+        of an item's photos. Most passengers have no photo of what they lost,
+        but depots photograph every item, so this lets the description be
+        compared with what the item actually looks like. Raw cosines are small
+        (about 0.15-0.35); the matcher calibrates them per block.
+        """
+        if not self.available or not text or not image_paths:
+            return None
+        feats = [e for e in (self.embed(p) for p in image_paths) if e is not None]
+        if not feats:
+            return None
+        try:
+            emb = self._text_cache.get(text) if hasattr(self, "_text_cache") else None
+            if emb is None:
+                import torch
+                inputs = self.processor(text=[f"a photo of {text}"], return_tensors="pt", padding=True,
+                                        truncation=True, max_length=77)
+                with torch.no_grad():
+                    out = self.model.get_text_features(**inputs)
+                    if not isinstance(out, torch.Tensor) and hasattr(out, "pooler_output"):
+                        out = out.pooler_output
+                    out = out / out.norm(dim=-1, keepdim=True)
+                emb = out[0].cpu().numpy()
+                if not hasattr(self, "_text_cache"):
+                    self._text_cache = {}
+                if len(self._text_cache) > 2048:
+                    self._text_cache.clear()
+                self._text_cache[text] = emb
+            return float(max(float(np.dot(emb, f)) for f in feats))
+        except Exception as e:
+            logger.error(f"CLIP text-to-image failed: {e}")
+            return None
+
     def zero_shot(self, image_paths, labels, template: str = "a photo of {}") -> Optional[dict]:
         """
         Phase 2 smart intake: CLIP zero-shot classification. Averages the (cached)
@@ -275,167 +315,3 @@ class OCRExtractor:
             logger.error(f"OCR Extraction failed for {image_path}: {e}")
 
         return ""
-
-# ──────────────────────────────────────────────
-# 2.6 OCR MATCH SCORING
-# ──────────────────────────────────────────────
-# Generic descriptors that must never, on their own, imply a match.
-# (Only words longer than 4 chars are scored, so short words are already
-#  excluded — this list catches the common *long* generic words.)
-_OCR_STOPWORDS = {
-    "black", "white", "brown", "green", "yellow", "orange", "purple",
-    "golden", "silver", "colour", "color", "small", "large", "medium",
-    "heavy", "light", "handbag", "luggage", "suitcase", "backpack",
-    "wallet", "purse", "pouch", "cover", "strap", "zipper", "inside",
-}
-
-
-def ocr_match_score(name: str, description: str, ocr_text: str) -> float:
-    """
-    Score how strongly text read off the item (OCR) confirms a lost report.
-
-    Why this is NOT a blunt 1.0 boost:
-      A bag tag showing the passenger's full name is near-certain proof, so
-      that still scores 1.0. But a single generic description word (e.g.
-      "black") appearing on the bag is weak evidence and must not, by itself,
-      clear the match threshold or trigger a high-confidence alert. So keyword
-      hits are filtered (stop-words + length) and require corroboration:
-        • full name found in OCR text      → 1.0  (strong)
-        • 2+ distinct significant keywords  → 1.0  (strong)
-        • exactly 1 significant keyword     → 0.4  (weak bonus)
-        • otherwise                         → 0.0
-
-    Returns a float in [0.0, 1.0].
-    """
-    if not ocr_text:
-        return 0.0
-    ocr_text = ocr_text.lower()
-
-    name = (name or "").lower().strip()
-    if len(name) >= 4 and name in ocr_text:
-        return 1.0
-
-    significant = {
-        w for w in (description or "").lower().split()
-        if len(w) > 4 and w.isalpha() and w not in _OCR_STOPWORDS
-    }
-    hits = sum(1 for w in significant if w in ocr_text)
-    if hits >= 2:
-        return 1.0
-    if hits == 1:
-        return 0.4
-    return 0.0
-
-
-# ──────────────────────────────────────────────
-# 2.7 STRUCTURED (TRAVEL-RECORD) MATCH SCORING
-# ──────────────────────────────────────────────
-def _seat_num(v):
-    """Best-effort parse of a seat value ('12', 'A5', 12) → int or None."""
-    if v is None:
-        return None
-    import re as _re
-    m = _re.search(r"\d+", str(v))
-    return int(m.group()) if m else None
-
-
-def structured_match_score(found_trip_id, lost_trip_id,
-                           found_bus_id, lost_bus_id,
-                           found_seat, lost_seat) -> float:
-    """
-    Score exact travel-record evidence linking a found item to a lost report,
-    using the transport database keys the passenger and depot now capture.
-
-    Precedence (strongest wins):
-        • same trip (route + bus + departure)  → 1.0  (near-proof)
-        • same bus (different/absent trip)      → 0.6  (strong)
-        • otherwise                              → 0.0
-    Plus a small seat-proximity bonus (+0.15) when the item was found within
-    two seats of where the passenger sat — but only if trip/bus already agree,
-    so a seat number alone can never manufacture a match.
-
-    Returns a float in [0.0, 1.0].
-    """
-    base = 0.0
-    if found_trip_id and lost_trip_id and found_trip_id == lost_trip_id:
-        base = 1.0
-    elif found_bus_id and lost_bus_id and found_bus_id == lost_bus_id:
-        base = 0.6
-
-    if base > 0.0:
-        fs, ls = _seat_num(found_seat), _seat_num(lost_seat)
-        if fs is not None and ls is not None and abs(fs - ls) <= 2:
-            base += 0.15
-
-    return min(1.0, base)
-
-
-# ──────────────────────────────────────────────
-# 3. UNIFIED SCORER
-# ──────────────────────────────────────────────
-class UnifiedScorer:
-    """
-    Combines text, image, and route scores into a single match score.
-
-    Formula:
-        final_score = (0.5 × text_score)
-                    + (0.3 × image_score)
-                    + (0.2 × route_score)
-                    + ocr_score
-                    + structured_score
-
-    Weights rationale:
-        - Text (0.5)  : Most reliable signal — descriptions are detailed
-        - Image (0.3) : Strong visual evidence when available
-        - Route (0.2) : Binary pass/fail based on route logic
-        - OCR (+1.0)  : If the passenger's name or exact description keywords are found on the bag, it's a guaranteed match.
-        - Structured (+1.0) : Exact travel-record evidence from the transport DB
-          (same trip / same bus / adjacent seat). A same-trip hit is near-proof,
-          so it can clear the threshold on its own — mirrors the OCR full-name case.
-
-    route_score is always 1.0 or 0.0 (boolean route eligibility).
-    When no image is provided, image_score = 0.0 (weight redistributed
-    implicitly — text becomes the dominant factor).
-    """
-
-    # Minimum final score to consider a report a "match"
-    MATCH_THRESHOLD = 0.30
-
-    @staticmethod
-    def compute(
-        text_score: float,
-        image_score: float,
-        route_score: float,
-        ocr_score: float = 0.0,
-        structured_score: float = 0.0
-    ) -> dict:
-        """
-        Compute unified score and return a breakdown dict.
-
-        Returns:
-            {
-              "text":   0.72,
-              "image":  0.65,
-              "route":  1.0,
-              "ocr":    0.0,
-              "structured": 0.6,
-              "final":  0.70,
-              "is_match": True
-            }
-        """
-        final = (
-            (0.5 * text_score) + (0.3 * image_score) + (0.2 * route_score)
-            + ocr_score + structured_score
-        )
-        # Cap at 1.0
-        final = min(1.0, float(final))
-        final = round(float(final), 4)
-        return {
-            "text":       round(float(text_score), 4),
-            "image":      round(float(image_score), 4),
-            "route":      round(float(route_score), 4),
-            "ocr":        round(float(ocr_score), 4),
-            "structured": round(float(structured_score), 4),
-            "final":      final,
-            "is_match": final >= UnifiedScorer.MATCH_THRESHOLD
-        }

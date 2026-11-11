@@ -80,6 +80,14 @@ def item_is_available(found) -> bool:
 # passengers apart: every passenger-owned record also carries the passengerSeq
 # the two-layer login resolved, and access is checked against it. Records from
 # before that existed are stamped once at startup (backfill_passenger_seqs).
+def _reasons(score) -> list:
+    """Why the matcher paired these (v2 scores), strongest first, for the staff queue."""
+    if score.get("version", 1) < 2:
+        return []
+    from matching import summary
+    return summary(score)
+
+
 def _session_seqs(passenger) -> list:
     return [int(s) for s in (getattr(passenger, "passenger_seqs", ()) or ())]
 
@@ -170,6 +178,12 @@ class MatchNotifyService:
         now = self.clock()
         confidence = round(float(score.get("final", 0.0)), 4)
         decision = route_confidence(confidence, self.config)
+        if score.get("version", 1) >= 2:
+            # v2 scores carry their own gates: auto needs an identifying signal, no
+            # contradiction and a clear lead; review only for the leading contenders.
+            from matching import route as route_v2
+            decision = {"auto": AUTO, "review": REVIEW}.get(
+                route_v2(score, self.config.auto_notify_min, self.config.review_min), REJECT)
         status = {AUTO: AUTO_APPROVED, REVIEW: PENDING_REVIEW, REJECT: REJECTED}[decision]
         key = {"reportId": lost["request_id"], "itemId": found["found_id"]}
         on_insert = {
@@ -618,6 +632,7 @@ class MatchNotifyService:
             rows.append({
                 "matchId": str(m["_id"]), "status": m.get("status"),
                 "confidence": m.get("confidence"), "routedAs": m.get("routedAs"),
+                "reasons": _reasons(m.get("score") or {}), "blockers": (m.get("score") or {}).get("blockers") or [],
                 "deliveryStatus": m.get("deliveryStatus"),
                 "createdAt": iso_utc(m["createdAt"]) if m.get("createdAt") else None,
                 "report": {"trackingId": lost.get("tracking_id"), "status": lost.get("status"),

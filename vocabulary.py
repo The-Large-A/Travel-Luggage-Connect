@@ -41,9 +41,10 @@ BRANDS = {
     "laptop": ("Dell", "HP", "Lenovo", "Asus", "Acer", "Apple", "MSI"),
     "spectacles": ("Lenskart", "Titan", "Ray-Ban", "Vincent Chase", "Fastrack"),
     "umbrella": ("Popy", "John's", "Citizen", "Sun Brand"),
-    "clothing": ("Raymond", "Peter England", "Allen Solly", "Louis Philippe", "Van Heusen", "Pothys", "RmKV"),
+    "clothing": ("Raymond", "Peter England", "Allen Solly", "Louis Philippe", "Van Heusen", "Pothys", "RmKV",
+                 "Puma", "Nike", "Adidas"),
     "documents": (),
-    "other": (),
+    "other": ("Milton", "Cello", "Tupperware", "Borosil"),
 }
 ALL_BRANDS = tuple(sorted({b for bs in BRANDS.values() for b in bs}, key=str.lower))
 
@@ -84,6 +85,48 @@ CATEGORY_HINTS = {
     "documents": ("What kind of documents?", "Was there a folder or cover?"),
     "clothing": ("What item of clothing?", "Any label or name inside?"),
     "other": ("What exactly is it?",),
+}
+
+
+# ── what the item IS, from free text ─────────────────────────────────────────
+# Canonical tokens (after claims.normalize folding) that name the item itself.
+# The FIRST such noun in a description is the item; later ones are contents
+# ("black bag with a phone inside" is a bag).
+CATEGORY_NOUNS = {
+    "bag": ("bag", "bags", "backpack", "suitcase", "trolley", "handbag", "luggage", "satchel", "sling",
+            "duffel", "rucksack", "schoolbag", "haversack", "tote", "briefcase", "pai", "பை", "laptopbag"),
+    "wallet": ("wallet",),
+    "phone": ("phone",),
+    "laptop": ("laptop", "tablet", "ipad", "macbook"),
+    "spectacles": ("spectacles", "sunglasses", "goggles"),
+    "umbrella": ("umbrella",),
+    "documents": ("documents", "document", "file", "files", "folder", "papers", "envelope", "passport",
+                  "certificate"),
+    "clothing": ("clothes", "jacket", "sweater", "shawl", "jerkin", "coat", "cap", "hat", "hoodie", "blazer",
+                 "kurta", "dupatta", "veshti", "lungi"),
+}
+NOUN_CATEGORY = {noun: cat for cat, nouns in CATEGORY_NOUNS.items() for noun in nouns}
+
+# Categories a passenger and a depot can reasonably file the same thing under
+# ("purse" is a wallet to some and a handbag to others; a laptop bag is a bag).
+COMPATIBLE_CATEGORIES = frozenset(frozenset(p) for p in (
+    ("bag", "wallet"), ("bag", "laptop"), ("laptop", "phone"), ("documents", "wallet"), ("bag", "clothing")))
+
+# Brand → the categories it makes (lower-cased keys).
+BRAND_HOMES = {}
+for _cat, _names in BRANDS.items():
+    for _b in _names:
+        BRAND_HOMES.setdefault(_b.casefold(), set()).add(_cat)
+BRAND_HOMES = {b: frozenset(c) for b, c in BRAND_HOMES.items()}
+
+# What can sensibly be INSIDE each kind of item: the pool for "name one thing
+# inside it" options. A wallet never offers "umbrella"; a phone has no contents.
+CONTENT_POOLS = {
+    "bag": ("clothes", "tiffin", "bottle", "book", "charger", "towel", "medicine", "earphones", "keys",
+            "umbrella", "spectacles", "wallet", "powerbank", "money"),
+    "wallet": ("money", "card", "photo", "ticket", "bill", "keys"),
+    "documents": ("certificate", "passport", "card", "photo", "bill", "ticket", "book"),
+    "clothing": ("money", "keys", "ticket", "bill", "card", "earphones"),
 }
 
 
@@ -160,6 +203,60 @@ def similar_colours(name: str, n: int = 2) -> list:
     others = sorted((delta_e2000(ref, lab), other) for other, lab in COLOUR_LAB.items() if other != name)
     return [other for _, other in others[:n]]
 
+
+
+# ── colour confusion (shared by the matcher and the ownership questions) ────
+# Pairs people call by either name, or that bus lighting / phone cameras swap:
+# the six palette pairs under ΔE00 25 plus the common naming confusions
+# (charcoal: black/grey, navy: black/blue, tan: brown/orange, maroon: red/brown,
+# cream: yellow/white, teal: blue/green, olive: green/grey, magenta: pink/purple).
+COLOUR_ADJACENT = frozenset(frozenset(p) for p in (
+    ("black", "grey"), ("black", "blue"), ("black", "brown"), ("grey", "silver"), ("grey", "white"),
+    ("silver", "white"), ("red", "pink"), ("red", "orange"), ("red", "brown"), ("orange", "brown"),
+    ("orange", "gold"), ("orange", "yellow"), ("yellow", "gold"), ("yellow", "white"), ("gold", "brown"),
+    ("pink", "purple"), ("purple", "blue"), ("blue", "green"), ("green", "grey"), ("silver", "gold"),
+))
+
+# How common each colour is among lost bags and accessories (sums to 1). A match
+# on a rare colour is stronger evidence than a match on black (term frequency).
+COLOUR_PRIOR = {"black": 0.32, "blue": 0.14, "grey": 0.09, "brown": 0.08, "red": 0.06, "white": 0.05,
+                "green": 0.05, "pink": 0.04, "silver": 0.04, "gold": 0.04, "purple": 0.03, "orange": 0.03,
+                "yellow": 0.03}
+assert set(COLOUR_PRIOR) == set(COLOURS) and abs(sum(COLOUR_PRIOR.values()) - 1) < 1e-9
+
+
+def colours_confusable(a: str, b: str) -> bool:
+    return a == b or frozenset((a, b)) in COLOUR_ADJACENT
+
+
+def contrasting_colours(true_colour: str, n: int = 3, min_delta: float = 25.0) -> list:
+    """
+    Up to n colours an owner can never confuse with `true_colour` or with each
+    other (no confusable pair, CIEDE2000 >= min_delta between all of them),
+    chosen to be about as common as the true colour, so popularity does not
+    give the answer away (flat options). Deterministic.
+    """
+    if true_colour not in COLOUR_LAB:
+        return []
+    chosen = [true_colour]
+    target = COLOUR_PRIOR[true_colour]
+    for cand in sorted(COLOUR_LAB, key=lambda c: (abs(COLOUR_PRIOR[c] - target), c)):
+        if cand in chosen:
+            continue
+        if any(colours_confusable(cand, c) or delta_e2000(COLOUR_LAB[cand], COLOUR_LAB[c]) < min_delta
+               for c in chosen):
+            continue
+        chosen.append(cand)
+        if len(chosen) == n + 1:
+            break
+    return chosen[1:]
+
+
+def option_flatness(options, prior=None) -> float:
+    """Best blind-guess success (max prior / sum of priors) over a set of options."""
+    prior = prior or COLOUR_PRIOR
+    weights = [prior.get(o, min(prior.values())) for o in options]
+    return max(weights) / sum(weights) if weights else 1.0
 
 # ── description detail (the passenger "match readiness" meter) ───────────────
 _WORD = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)

@@ -103,9 +103,25 @@
             const tr = document.createElement('tr');
             tr.className = 'border-t border-slate-100';
             tr.dataset.matchId = m.matchId;
+            const why = cell(`${Math.round((m.confidence || 0) * 100)}%`, 'font-bold');
+            if ((m.reasons || []).length || (m.blockers || []).length) {
+                const list = document.createElement('ul');
+                list.className = 'mt-1 space-y-0.5 text-[11px] font-normal text-slate-600';
+                for (const r of (m.reasons || [])) {
+                    const li = document.createElement('li');
+                    li.textContent = '• ' + r;                       // textContent: never HTML
+                    list.append(li);
+                }
+                for (const b of (m.blockers || [])) {
+                    const li = document.createElement('li');
+                    li.className = 'text-amber-800';
+                    li.textContent = 'Needs you: ' + b;
+                    list.append(li);
+                }
+                why.append(list);
+            }
             tr.append(cell(m.report.trackingId, 'mono font-bold'), cell(m.report.description),
-                      cell(`${m.item.publicDescription || '—'} / ${m.item.notes || '—'}`),
-                      cell(`${Math.round((m.confidence || 0) * 100)}%`, 'font-bold'));
+                      cell(`${m.item.publicDescription || '—'} / ${m.item.notes || '—'}`), why);
             const actions = document.createElement('td');
             actions.className = 'p-3 align-top whitespace-nowrap space-x-2';
             actions.append(

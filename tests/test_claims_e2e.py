@@ -18,7 +18,7 @@ from test_match_e2e import _login, _report_lost, _today, e2e, real_app  # noqa: 
 def _log_item_with_secrets(depot):
     return depot.post("/depot/found", content_type="multipart/form-data", data={
         "route_id": "R100", "trip_id": "T1", "date": _today(),
-        "notes": "black backpack with laptop", "public_description": "Black backpack",
+        "notes": "black Wildcraft backpack, laptop and tiffin inside", "public_description": "Black backpack",
         "category": "bag",
         "attr_zipper_tag_colour": "Yellow", "attr_content_item": "steel tiffin box",
         "attr_brand": "Wildcraft", "attr_distinguishing_mark": "Chennai Super Kings sticker",
@@ -34,7 +34,7 @@ def test_full_journey_all_three_features(e2e):
     try:
         # Feature 1: OTP login, then a lost report owned by the verified passenger.
         passenger = _login(app.test_client(), sms, ARUN)
-        assert _report_lost(passenger, "black backpack with laptop", _today()).status_code == 302
+        assert _report_lost(passenger, "black Wildcraft backpack with my laptop and a tiffin box", _today()).status_code == 302
         lost = db.lost_reports.find_one()
 
         # Depot logs the item with its secret ownership details and a photo.
@@ -128,11 +128,11 @@ def test_legacy_depot_resolve_cannot_bypass_a_claim_lock(e2e):
     app_module, db, sms = e2e
     app = app_module.app
     passenger = _login(app.test_client(), sms, ARUN)
-    _report_lost(passenger, "black backpack with laptop", _today())
+    _report_lost(passenger, "black Wildcraft backpack with my laptop and a tiffin box", _today())
     depot = app.test_client()
     depot.post("/depot/login", data={"phone": "9000000004", "password": "pass123"})
     resp = depot.post("/depot/found", data={"route_id": "R100", "trip_id": "T1", "date": _today(),
-                                            "notes": "black backpack with laptop", "public_description": "Backpack",
+                                            "notes": "black Wildcraft backpack, laptop and tiffin inside", "public_description": "Backpack",
                                             "category": "bag", "attr_brand": "Wildcraft",
                                             "attr_content_item": "tiffin"})
     assert resp.status_code == 302
