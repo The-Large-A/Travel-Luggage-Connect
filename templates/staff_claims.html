@@ -17,8 +17,9 @@
                 <label for="token-input" class="block text-xs font-bold text-slate-700">1. Passenger's QR or pickup code</label>
                 <input id="token-input" autocomplete="off" spellcheck="false" placeholder="Scan the QR, or type A7X2-K9P4"
                        class="w-full h-[44px] px-3 border border-slate-300 rounded-md mono input-focus">
-                <button id="camera-btn" type="button" class="hidden text-xs font-bold text-tn-blue uppercase hover:underline">Scan with camera</button>
+                <button id="camera-btn" type="button" class="text-xs font-bold text-tn-blue uppercase hover:underline">Scan with camera</button>
                 <video id="camera" class="hidden w-full max-w-[320px] rounded-md" playsinline muted></video>
+                <p id="camera-msg" class="hidden text-xs text-slate-500"></p>
             </div>
             <div class="space-y-1.5">
                 <label for="tag-input" class="block text-xs font-bold text-slate-700">2. Item's QR tag</label>
@@ -83,6 +84,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <script>
 (() => {
     const CSRF = document.querySelector('meta[name="csrf-token"]').content;
@@ -165,26 +167,63 @@
         }
     });
 
-    // Camera scanning where the browser supports it; USB/Bluetooth scanners type into the field.
-    if ('BarcodeDetector' in window) {
-        $('camera-btn').classList.remove('hidden');
-        $('camera-btn').addEventListener('click', async () => {
-            const video = $('camera');
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-            video.srcObject = stream; video.classList.remove('hidden'); await video.play();
-            const detector = new BarcodeDetector({ formats: ['qr_code'] });
-            const loop = async () => {
-                const codes = await detector.detect(video).catch(() => []);
-                if (codes.length) {
-                    $('token-input').value = codes[0].rawValue;
-                    stream.getTracks().forEach(t => t.stop()); video.classList.add('hidden');
-                    return;
-                }
-                requestAnimationFrame(loop);
-            };
-            loop();
-        });
+    // QR codes are links to this page: #pickup=<code> (passenger) or #tag=<TAG-…> (item).
+    // A phone camera opens the link directly; the scanner below and USB scanners
+    // (which type the whole link) are reduced to the code.
+    function applyScan(text) {
+        const t = String(text || '').trim();
+        if (t.includes('#tag=')) { $('tag-input').value = t.split('#tag=')[1]; return 'tag'; }
+        if (/^TNSTC-TAG:/i.test(t)) { $('tag-input').value = t.slice(10); return 'tag'; }
+        $('token-input').value = t.includes('#pickup=') ? t.split('#pickup=')[1] : t;
+        return 'token';
     }
+    if (location.hash.startsWith('#pickup=') || location.hash.startsWith('#tag=')) {
+        applyScan(location.href);
+        history.replaceState(null, '', location.pathname);         // keep the code out of the address bar
+    }
+    ['token-input', 'tag-input'].forEach(id => $(id).addEventListener('change', e => {
+        if (e.target.value.includes('#')) applyScan(e.target.value);
+    }));
+
+    // Camera scanning: BarcodeDetector where the browser has it, else jsQR (Chrome on Windows).
+    $('camera-btn').addEventListener('click', async () => {
+        const video = $('camera'), msg = $('camera-msg');
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        } catch (e) {
+            msg.textContent = 'Camera not available here (it needs http://localhost or https). Type the code instead.';
+            msg.classList.remove('hidden');
+            return;
+        }
+        video.srcObject = stream; video.classList.remove('hidden'); await video.play();
+        msg.textContent = 'Point the camera at the QR code.'; msg.classList.remove('hidden');
+        const detector = ('BarcodeDetector' in window) ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+        const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const stop = () => { stream.getTracks().forEach(t => t.stop()); video.classList.add('hidden'); msg.classList.add('hidden'); };
+        const read = async () => {
+            if (detector) {
+                const codes = await detector.detect(video).catch(() => []);
+                return codes.length ? codes[0].rawValue : null;
+            }
+            if (!window.jsQR || !video.videoWidth) return null;
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            const code = window.jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height);
+            return code ? code.data : null;
+        };
+        const loop = async () => {
+            const text = await read();
+            if (text) {
+                const kind = applyScan(text);
+                stop();
+                if (kind === 'token') $('verify-btn').click();
+                return;
+            }
+            requestAnimationFrame(loop);
+        };
+        loop();
+    });
 
     function cell(text, cls) {
         const td = document.createElement('td');

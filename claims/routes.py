@@ -41,6 +41,7 @@ from passenger_auth.errors import AuthError
 from .service import ClaimError, NotFound
 from .statemachine import TRANSITIONS
 from .tokens import TokenError, normalize_tag
+from public_url import PICKUP_PREFIX, TAG_PREFIX, scanned_value, tag_link
 
 bp = Blueprint("claims", __name__)
 CLAIM_STATUSES = tuple(TRANSITIONS)
@@ -277,10 +278,14 @@ def staff_reissue(claim_id):
 
 
 def _token_input(body):
-    token = body.get("token")
+    token = scanned_value(body.get("token"), PICKUP_PREFIX)     # a scanned QR is a link to the desk
     if not token or len(token) > 1024:
         raise AuthError(400, "invalid_request", "Scan the QR or type the pickup code.", fields={"token": "required"})
     return token
+
+
+def _tag_input(body):
+    return scanned_value(body.get("qrTagId"), TAG_PREFIX) or None
 
 
 @bp.route("/pickup/verify", methods=["POST"])
@@ -288,7 +293,7 @@ def _token_input(body):
 @rate_limited
 def pickup_verify():
     body = _body({"token": str, "qrTagId": str})
-    result = _svc().verify_pickup(_token_input(body), g.staff_depot["phone"], body.get("qrTagId") or None)
+    result = _svc().verify_pickup(_token_input(body), g.staff_depot["phone"], _tag_input(body))
     return _json({"ok": True, **result})
 
 
@@ -310,7 +315,7 @@ def pickup_complete():
                   "idLast4": str, "idOtp": str})
     staff_name = (body.get("staffName") or "").strip()[:60] or None
     claim, item = _call(_svc().complete_pickup, _token_input(body), g.staff_depot["phone"],
-                        body.get("qrTagId") or None, body.get("idChecked"), staff_name,
+                        _tag_input(body), body.get("idChecked"), staff_name,
                         body.get("idLast4"), body.get("idOtp"))
     return _json({"ok": True, "claimId": claim["claimId"], "status": claim["status"],
                   "itemStatus": "handed_over", "qrTagId": item.get("qrTagId")})
@@ -328,7 +333,7 @@ def item_tag(found_id):
     except TokenError:
         return render_template("passenger_not_found.html"), 404
     return render_template("staff_item_tag.html", item=item, tag=tag,
-                           qr_svg=svc.qr_svg(f"TNSTC-TAG:{tag}"), custody=svc.custody_entries(found_id))
+                           qr_svg=svc.qr_svg(tag_link(tag)), custody=svc.custody_entries(found_id))
 
 
 @bp.route("/staff/claims-desk", methods=["GET"])

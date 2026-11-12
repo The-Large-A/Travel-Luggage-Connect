@@ -50,7 +50,7 @@ Result at time of writing: **465 passed**. That is 150 Feature 3 tests, plus 134
 | R33 | Passenger notified after approval and handover | A `test_open_answer_approve_token_pickup`, A `test_staff_approve_borderline_issues_token`, E |
 | R34 | Reissue requires the ID-verified flag and revokes the old token | A `test_lost_phone_reissue_revokes_old_token` |
 | R35 | Staff routes depot-scoped, staff-only, CSRF-protected | A `test_staff_are_scoped_to_their_depot`, A `test_staff_endpoints_need_staff`, A `test_staff_actions_require_csrf`, A `test_staff_filter_and_body_validation` |
-| R36 | Seed: items with attributes + tags, multi-claim conflict, borderline case, expired token | A `test_seed_claims_scenarios_and_idempotency` |
+| R36 | Seed: items with attributes + tags, multi-claim conflict, borderline case, expired token | Removed with the demo claim seed (the review build starts with no sample claims) |
 | R37 | FULL end-to-end across all three features | E `test_full_journey_all_three_features` |
 | R38 | Legacy depot "resolve" cannot bypass a claim lock | E `test_legacy_depot_resolve_cannot_bypass_a_claim_lock` |
 

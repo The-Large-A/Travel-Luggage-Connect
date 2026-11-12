@@ -86,7 +86,7 @@ The step-by-step script for a live demo is [DEMO.md](DEMO.md).
 ## 4½. Real MongoDB (local replica set)
 
 `tests/test_local_mongo_integration.py` runs against a real MongoDB 9.0.2 single-node replica set
-(`python local_mongo.py up`, then `LOCAL_MONGO_URI=... python -m pytest tests/test_local_mongo_integration.py`).
+(`python start.py`, then `LOCAL_MONGO_URI=... python -m pytest tests/test_local_mongo_integration.py`).
 All **7 pass**:
 - transactions are detected;
 - a crash inside `run_atomically` leaves no writes, with MongoDB's own abort rather than the fallback;
@@ -97,7 +97,7 @@ All **7 pass**:
 
 Without `LOCAL_MONGO_URI` these 7 tests are skipped, so the default suite stays database-free.
 
-The seed data is also reproducible. After `python local_mongo.py reset` (wipe and reseed from scratch),
+The seed data is also reproducible. After `python start.py --fresh` (wipe and reseed from scratch),
 a fingerprint of every original setup collection was byte-identical: depots, stops, buses, routes,
 trips, drivers, conductors and schedules.
 

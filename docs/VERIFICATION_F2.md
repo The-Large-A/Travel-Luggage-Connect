@@ -47,7 +47,7 @@ deterministic stubs, and MongoDB by mongomock.
 | R27 | Staff auth (existing depot login, depot-scoped, CSRF) | A `test_staff_routes_unauthenticated_401`, A `test_staff_cannot_act_on_other_depots_matches`, A `test_retry_is_scoped_to_staff_depot`, A `test_staff_actions_require_csrf`, A `test_staff_page_redirects_non_staff` |
 | R28 | One item → several reports: notify each, leak nothing | A `test_same_item_matched_to_multiple_reports_notifies_each_without_leaking` |
 | R29 | UI: notifications list, match detail + countdown + "Start claim" entry point, expired state, staff queue + status table | A `test_report_matches_and_notifications_endpoints`, A `test_match_view_is_privacy_safe_with_ist_and_countdown`, A `test_hold_expiry_boundary_and_release`, A `test_staff_page_redirects_non_staff` |
-| R30 | Seed: high/medium/low, expired, multi-report conflict, email-only passenger | A `test_seed_matches_covers_scenarios_and_is_idempotent` |
+| R30 | Seed: high/medium/low, expired, multi-report conflict, email-only passenger | Removed with the demo match seed (the review build starts with no sample matches) |
 | R31 | Legacy match documents migrate without notifying | A `test_legacy_matches_are_backfilled_without_notifying` |
 | R32 | Lost reports are owned (filing requires Feature 1 login) | E `test_lost_report_requires_passenger_login`, E `test_end_to_end_…` (step 1) |
 | R33 | Found items need a separate public description | E `test_found_item_requires_public_description` |
@@ -98,7 +98,7 @@ update's filter still requires `rejectedBy: system`, a deliberate second guard.
 ## 4. Manual check in the running app
 
 Atlas credentials were still rejected (`bad auth`). The real `app.py` was therefore run against
-in-memory mongomock with `seed_bookings.py` + `seed_matches.py` loaded and the background worker
+in-memory mongomock with the sample bookings and demo matches loaded and the background worker
 on. It was driven in a browser:
 
 - **Seed log:** high → mock WhatsApp; email-only Priya → mock email; 0.71 → review queue;

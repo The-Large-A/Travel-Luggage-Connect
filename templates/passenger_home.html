@@ -29,7 +29,12 @@
             </div>
             <div class="sm:col-span-2">
                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Route</p>
+                {% if journey %}
+                <p class="font-bold text-slate-800 text-sm">{{ journey.route.route_no }} {{ journey.route.origin_name }} → {{ journey.route.dest_name }}</p>
+                <p class="text-xs text-slate-500">Boarded at {{ journey.boardingStop }} · got off at {{ journey.alightingStop }}{% if journey.seatNo %} · seat {{ journey.seatNo }}{% endif %}</p>
+                {% else %}
                 <p class="font-bold text-slate-800 text-sm">{{ booking.route }}</p>
+                {% endif %}
             </div>
             <div class="sm:col-span-2">
                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Session</p>

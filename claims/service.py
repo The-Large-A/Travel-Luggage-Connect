@@ -445,7 +445,9 @@ class ClaimsService:
         payload = self.qr_payload(claim)
         item = self._item(claim)
         depot = self.db["depots"].find_one({"phone": claim["depotId"]}) or {}
-        return {"code": format_code(self._code(claim)), "qrPayload": payload, "qrSvg": self.qr_svg(payload),
+        from public_url import pickup_link                 # a phone camera opens the depot's desk
+        return {"code": format_code(self._code(claim)), "qrPayload": payload,
+                "qrSvg": self.qr_svg(pickup_link(payload)),
                 "expiresAt": iso_utc(claim["tokenExpiresAt"]), "expiresAtIst": fmt_ist(claim["tokenExpiresAt"]),
                 "expiresInSeconds": seconds_until(claim["tokenExpiresAt"], self.clock()),
                 "depot": depot.get("name") or item.get("depot_name"),

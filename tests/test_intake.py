@@ -434,4 +434,5 @@ def test_scan_page_renders_for_staff(intake):
     page = staff.get("/depot/items/new")
     html = page.get_data(as_text=True)
     assert page.status_code == 200 and "Add New Lost Item" in html and "intake.js" in html
-    assert "Add new lost item" in staff.get("/depot").get_data(as_text=True)
+    # Review build: the scan page still works, but the dashboard no longer links to it.
+    assert "Add new lost item" not in staff.get("/depot").get_data(as_text=True)

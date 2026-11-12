@@ -6,7 +6,7 @@ existing documents are left alone. Applied at startup; failures are logged only.
 import logging
 
 from passenger_auth.identity import MOCK_UIDAI, MOCK_UIDAI_VALIDATOR
-from seed_bookings import BOOKINGS_VALIDATOR
+from seed import BOOKINGS_VALIDATOR
 from vocabulary import CATEGORIES, STORAGE_KEYS
 
 logger = logging.getLogger(__name__)

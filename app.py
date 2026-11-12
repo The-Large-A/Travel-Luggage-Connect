@@ -28,6 +28,7 @@ from notifications import notification_service
 import transport_schema as T
 from passenger_auth import init_passenger_auth, require_passenger
 import description_enhancer
+from public_url import LOOPBACK, public_base_url
 from passenger_auth.phone import mask_phone, try_normalize_phone
 from passenger_auth.timeutil import to_db, utcnow, fmt_ist
 from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
@@ -59,7 +60,7 @@ found_collection   = db['found_reports']  # Depot found item reports
 matches_collection = db['matches']        # Persisted AI-match links
 depots_collection  = db['depots']         # Depot credentials
 
-# Transport master collections (seeded by seed_transport.py, see transport_schema)
+# Transport master collections (seeded by seed.py, see transport_schema)
 stops_collection   = db[T.STOPS]
 buses_collection   = db[T.BUSES]
 routes_collection  = db[T.ROUTES]
@@ -165,7 +166,7 @@ QR_VERIFY_LIMIT = 30          # scans per IP per 10 minutes
 def tracking_qr_url(report) -> str:
     """The URL a phone camera opens: an encrypted token, never the tracking ID itself."""
     token = tracking_qr.issue(report["tracking_id"], report["request_id"])
-    return url_for('verify_report_qr', token=token, _external=True)
+    return public_base_url() + url_for('verify_report_qr', token=token)     # reachable from a phone
 
 
 def save_tracking_qr(report):
@@ -663,6 +664,10 @@ def journey_from_booking(row):
         "boardingStopId": b, "boardingStop": names.get(b, ""),
         "alightingStopId": a, "alightingStop": names.get(a, ""), "seatNo": row.get("seatNo"),
     }
+
+
+# The dashboard shows the same journey the report form and the reports use.
+app.extensions['passenger_journeys'] = lambda p: [j for j in map(journey_from_booking, booking_rows_for(p)) if j]
 
 
 @app.route('/api/passenger/journey')
@@ -1724,5 +1729,8 @@ if __name__ == '__main__':
     # the depot scan from a phone on the same Wi-Fi, run with HTTPS_ADHOC=1
     # HOST=0.0.0.0 (self-signed certificate: the phone shows a one-time warning).
     ssl_context = 'adhoc' if os.environ.get('HTTPS_ADHOC') == '1' else None
+    if os.environ.get('HOST', '127.0.0.1') in LOOPBACK:
+        logger.warning("Listening on %s only: phones cannot open the QR codes. Start with `python start.py` "
+                       "(or set HOST=0.0.0.0).", os.environ.get('HOST', '127.0.0.1'))
     app.run(debug=debug, use_reloader=False, host=os.environ.get('HOST', '127.0.0.1'),
             port=int(os.environ.get('PORT', '5003')), ssl_context=ssl_context)

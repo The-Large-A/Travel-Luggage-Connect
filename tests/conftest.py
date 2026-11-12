@@ -24,11 +24,11 @@ from passenger_auth import init_passenger_auth                       # noqa: E40
 from passenger_auth.config import AuthConfig                          # noqa: E402
 from passenger_auth.sms import SmsProvider                            # noqa: E402
 from passenger_auth.identity import seed_mock_uidai                   # noqa: E402
-from seed_bookings import seed_bookings                               # noqa: E402
+from seed import seed_bookings                               # noqa: E402
 
 TEST_SECRET = "test-signing-secret-0123456789-abcdefghijklmnopqrstuvwxyz"
 
-# Seeded sample identities (see seed_bookings.SAMPLE_BOOKINGS).
+# Seeded sample identities (see seed.SAMPLE_BOOKINGS).
 ARUN = {"pnr": "T26100101", "phone": "9876543210"}
 PRIYA = {"pnr": "T26100102", "phone": "9444012345"}
 KARTHIK = {"pnr": "T26100103", "phone": "9840011223"}
@@ -154,7 +154,7 @@ def aadhaar_for(ident) -> str:
     """The mock Aadhaar number of the passenger a test identity (pnr, phone) stands for."""
     from passenger_auth.identity import mock_number_for
     from passenger_auth.phone import normalize_phone
-    from seed_bookings import SAMPLE_BOOKINGS
+    from seed import SAMPLE_BOOKINGS
     phone = normalize_phone(ident["phone"])
     for pnr, _seq, name, raw_phone, *_ in SAMPLE_BOOKINGS:
         if pnr == ident["pnr"] and normalize_phone(raw_phone) == phone:
@@ -165,7 +165,7 @@ def aadhaar_for(ident) -> str:
 def passenger_seq_for(ident) -> int:
     """The passengerSeq of the sample-booking passenger a test identity (pnr, phone) stands for."""
     from passenger_auth.phone import normalize_phone
-    from seed_bookings import SAMPLE_BOOKINGS
+    from seed import SAMPLE_BOOKINGS
     phone = normalize_phone(ident["phone"])
     return min(seq for pnr, seq, _n, raw, *_ in SAMPLE_BOOKINGS
                if pnr == ident["pnr"] and normalize_phone(raw) == phone)

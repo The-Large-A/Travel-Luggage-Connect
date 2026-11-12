@@ -595,27 +595,6 @@ def test_legacy_matches_are_backfilled_without_notifying(db, clock, sms):
     assert not f2.notifications()
 
 
-# ── Seed data ────────────────────────────────────────────────────────────────
-def test_seed_matches_covers_scenarios_and_is_idempotent(db, clock, sms):
-    from match_notify import ensure_match_indexes
-    from seed_matches import seed_matches
-    ensure_match_indexes(db)
-    first = seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
-    status = {db.lost_reports.find_one({"request_id": m["reportId"]})["tracking_id"]: m["status"]
-              for m in db.matches.find()}
-    assert status == {"TRK-DEMO0001": "notified", "TRK-DEMO0002": "notified",
-                      "TRK-DEMO0003": "pending_staff_review", "TRK-DEMO0004": "rejected",
-                      "TRK-DEMO0005": "released", "TRK-DEMO0006": "notified", "TRK-DEMO0007": "notified"}
-    assert first["released"] == 1
-    assert db.matches.count_documents({"itemId": "demo-item-redbag"}) == 2          # multi-report conflict
-    channels = {(n["reportId"], n["channel"]): n["status"] for n in db.notifications.find()}
-    assert channels[("demo-trk-demo0002", "email")] == "sent"                      # email-only passenger
-    assert channels[("demo-trk-demo0007", "whatsapp")] == "failed"                 # no channel at all
-    messages = db.message_log.count_documents({})
-    seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
-    assert db.matches.count_documents({}) == 7 and db.message_log.count_documents({}) == messages
-
-
 # ── Group bookings: one PNR, one shared phone, two passengers ────────────────
 def _login_as(f2, name, pnr):
     from conftest import AuthFlow

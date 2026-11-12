@@ -12,7 +12,7 @@ from conftest import ARUN, PRIYA
 from test_match_e2e import ENV, _login, _today, e2e, real_app  # noqa: F401  (fixtures)
 from passenger_auth.identity import mock_number_for, seed_mock_uidai
 from passenger_auth.timeutil import utcnow
-from seed_bookings import seed_bookings
+from seed import seed_bookings
 
 SECRET = ENV["SIGNING_SECRET"]
 

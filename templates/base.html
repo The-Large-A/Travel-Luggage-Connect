@@ -150,7 +150,6 @@
             {% if session.get('depot_phone') %}
             <p class="text-[10px] text-tn-blue tracking-widest pb-1">{{ session.get('depot_name') }} · Staff</p>
             <a href="{{ url_for('depot_dashboard') }}" class="block py-2 text-slate-700">Dashboard</a>
-            {% if 'item_intake' in config.get('FEATURES', ()) %}<a href="{{ url_for('item_intake.intake_page') }}" class="block py-2 text-tn-blue">+ Add new lost item</a>{% endif %}
             <a href="{{ url_for('match_notify.staff_review_page') }}" class="block py-2 text-slate-700">Match Review</a>
             {% if claim_catalogue is defined %}<a href="{{ url_for('claims.claims_desk') }}" class="block py-2 text-slate-700">Claims &amp; Pickup</a>{% endif %}
             <a href="{{ url_for('depot_logout') }}" class="block py-2 text-tn-red">Logout</a>

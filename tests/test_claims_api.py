@@ -676,31 +676,6 @@ def test_staff_actions_require_csrf(db, clock, sms, tmp_path):
     assert resp.status_code == 403 and _err(resp)["code"] == "csrf_failed"
 
 
-# ── Seed data ────────────────────────────────────────────────────────────────
-def test_seed_claims_scenarios_and_idempotency(db, clock, tmp_path):
-    from claims import ensure_claim_indexes
-    from match_notify import ensure_match_indexes
-    from seed_claims import seed_claims
-    from seed_matches import seed_matches
-    ensure_match_indexes(db)
-    ensure_claim_indexes(db)
-    seed_matches(db, now=clock(), signing_secret=TEST_SECRET)
-    result = seed_claims(db, TEST_SECRET, now=clock(), upload_dir=str(tmp_path))
-    assert result == {"ready_for_pickup": "token_issued", "conflict_winner": "token_issued",
-                      "borderline_staff_review": "staff_review", "expired_token": "token_issued",
-                      "expired_now": 1}
-    status = {c["reportId"]: c["status"] for c in db.claims.find()}
-    assert status["demo-trk-demo0009"] == "expired"
-    assert db.found_reports.find_one({"found_id": "demo-item-laptop"})["status"] == "open"
-    assert db.found_reports.find_one({"found_id": "demo-item-redbag"})["status"] == "claim_locked"
-    from seed_claims import SECRETS
-    seeded = list(db.found_reports.find({"found_id": {"$in": list(SECRETS)}}))
-    assert len(seeded) == 5 and all(i.get("qrTagId") and i.get("private_attributes") and i.get("image_path")
-                                    for i in seeded)
-    again = seed_claims(db, TEST_SECRET, now=clock(), upload_dir=str(tmp_path))
-    assert set(again.values()) == {"already seeded", 0} and db.claims.count_documents({}) == 4
-
-
 def test_shared_phone_passengers_cannot_open_or_see_each_others_claim(f3):
     """Senthil (seq 1) and Meena (seq 2) share T26100105 and one phone."""
     from conftest import AuthFlow

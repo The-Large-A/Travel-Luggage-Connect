@@ -134,7 +134,7 @@ def _number(body: str) -> str:
 
 
 # Fictitious, Verhoeff-valid demo numbers matching the sample bookings in
-# seed_bookings.py. (aadhaar, vid, name, year of birth, gender, linked phone)
+# seed.py. (aadhaar, vid, name, year of birth, gender, linked phone)
 MOCK_CITIZENS = (
     (_number("23456789012"), _number("912345678901234"), "Arun Kumar", 1994, "M", "+919876543210"),
     (_number("34567890123"), _number("923456789012345"), "Priya Raman", 1998, "F", "+919444012345"),
@@ -144,6 +144,7 @@ MOCK_CITIZENS = (
     (_number("78901234567"), _number("967890123456789"), "Meena Senthil", 1982, "F", "+919123456780"),
     (_number("89012345678"), _number("978901234567890"), "Ravi Senthil", 2004, "M", "+918098765432"),
     (_number("90123456789"), _number("989012345678901"), "Kavitha Mani", 1991, "F", "+917010203040"),
+    (_number("61234567890"), _number("991234567890123"), "Divya Prakash", 1996, "F", "+919500011122"),
 )
 
 

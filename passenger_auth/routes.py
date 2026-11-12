@@ -276,10 +276,12 @@ def login_page():
 @require_passenger(page=True)
 def passenger_home():
     passenger = g.passenger
+    journeys = current_app.extensions.get("passenger_journeys", lambda p: [])(passenger)
     return render_template(
         "passenger_home.html",
         passenger=passenger,
         booking=g.passenger_booking,
+        journey=journeys[0] if journeys else None,
         masked_phone=mask_phone(passenger.phone),
         session_expires_iso=iso_utc(passenger.expires_at),
         session_expires_ist=fmt_ist(passenger.expires_at),

@@ -4,7 +4,7 @@ import csv
 import math
 import os
 
-import seed_transport as st
+import seed as st
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

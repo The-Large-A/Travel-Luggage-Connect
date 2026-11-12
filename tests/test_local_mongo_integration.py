@@ -36,7 +36,7 @@ def real_db():
 
 @pytest.fixture
 def f3_real(real_db, tmp_path):
-    from seed_bookings import seed_bookings
+    from seed import seed_bookings
     clock = FakeClock()
     seed_bookings(real_db, now=clock(), signing_secret=TEST_SECRET)
     return F3(real_db, clock, RecordingSmsProvider(), tmp_path)

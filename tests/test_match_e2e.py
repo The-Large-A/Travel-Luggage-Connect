@@ -89,7 +89,7 @@ def e2e(real_app):
     for name in db.list_collection_names():
         db[name].delete_many({})
     from passenger_auth.identity import seed_mock_uidai
-    from seed_bookings import seed_bookings
+    from seed import seed_bookings
     state = real_app.app.extensions["passenger_auth"]
     seed_bookings(db, signing_secret=ENV["SIGNING_SECRET"], vault=state.vault)
     seed_mock_uidai(db, ENV["SIGNING_SECRET"], vault=state.vault)

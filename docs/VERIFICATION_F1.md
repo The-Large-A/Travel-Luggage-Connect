@@ -43,7 +43,7 @@ Result at time of writing: **181 passed** (165 new auth tests + 16 existing scor
 | R26 | TTL / cleanup of old records | U `test_ttl_cleanup_indexes_exist` |
 | R27 | Reusable `requirePassenger` exposing (pnr, phone, passengerName) | A `test_end_to_end_happy_path` (`/auth/me`, `/passenger`), A `test_missing_session`, A `test_expired_session_redirects_page_to_login` |
 | R28 | CSRF protection kept on the auth POSTs | A `test_csrf_enforced_on_auth_posts`, A `test_csrf_token_flow_works` |
-| R29 | Seed: several PNRs/phones, one cancelled, one multi-passenger; idempotent | U `test_seed_is_idempotent_and_covers_policy_cases` |
+| R29 | Seed: several PNRs/phones, one cancelled, one multi-passenger; idempotent | U `test_seed_is_idempotent_and_covers_policy_cases` (now `seed.py`) |
 
 ## 2. Edge cases from the brief
 

@@ -32,7 +32,7 @@ In traditional transport systems, lost items are recorded in manual registers, l
 - [x] **File Uploads**: Image processing for found items using `werkzeug`.
 
 ### **Data & Setup**
-- [x] **Database Seeding**: Python script (`seed_db.py`) to automatically populate the database with real-world routes (Chennai, Coimbatore, Madurai, etc.).
+- [x] **Database Seeding**: one script ([`seed.py`](seed.py)) builds the depots, the transport network from the official SETC timings, and the mock Aadhaar / PNR databases; `python start.py` runs it.
 - [x] **Environment Configuration**: Secure `.env` handling for API keys and database URIs.
 
 ---
@@ -81,74 +81,48 @@ pair and ranks the true item first every time (R@1 1.0, v1 0.43).
 
 ## ▶️ How to Run the Project
 
-### 1. Prerequisites
-- **Python 3.11+** installed.
-- **MongoDB** instance (Local or Atlas) ready.
+One command sets up and starts everything (Windows, macOS or Linux):
 
-### 2. Setup Environment
-Copy `.env.example` to `.env` and fill it in. At minimum:
-```env
-MONGO_URI=your_mongodb_connection_string
-SECRET_KEY=your_random_secret_key
-SIGNING_SECRET=at_least_32_random_characters   # passenger sessions + OTP hashing
-```
-Every passenger-auth setting (OTP lifetime, attempts, lock, rate limits, session TTL, SMS
-provider) is listed with its default in `.env.example`.
-
-### 3. Installation
 ```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Install requirements
-pip install -r requirements.txt
+python start.py
 ```
 
-### 4. Initialize Database
-Before running the app, seed the depot authentication and route data, then the sample
-passenger bookings (PNRs) used by passenger login:
-```bash
-python seed_transport.py
-python seed_bookings.py
-python seed_matches.py      # optional: Feature 2 demo matches
-python seed_claims.py       # optional: Feature 3 demo claims (needs SIGNING_SECRET)
-```
-For a guided live demo of all three features, follow [`docs/DEMO.md`](docs/DEMO.md).
+Needs only **Python 3.10+** (3.11 recommended) and an internet connection the first time.
+`start.py` then:
 
-### 5. Start Application
-```bash
-python app.py
-```
-Visit `http://127.0.0.1:5003` in your browser.
+1. creates `./venv` and installs `requirements.txt` (first run: several minutes);
+2. finds MongoDB, or on Windows downloads the official MongoDB Community Server zip into
+   `%USERPROFILE%\mongodb` (about 1 GB, SHA-256 checked). On macOS/Linux install MongoDB first
+   (`brew install mongodb-community`, or your package manager);
+3. starts MongoDB as a single-node replica set on `127.0.0.1:27017` (data in `~/mongodb/data`,
+   outside the project);
+4. seeds a fresh database with [`seed.py`](seed.py): depots, the transport network, the mock
+   Aadhaar and PNR databases. There are no old reports or claims;
+5. starts the app on `http://localhost:5003` **and** on the Wi-Fi address it prints, so phones on
+   the same Wi-Fi can open the QR codes, and prints the review logins.
 
-### Run everything on a local MongoDB (no Atlas needed)
-`local_mongo.py` runs a local MongoDB with the same seed data used to set up the online database. It
-replays `seed_db.py`, `seed_transport.py` (deterministic), `seed_bookings.py`, `seed_matches.py` and
-`seed_claims.py`.
+Ctrl+C stops the app and the database.
 
-1. Download the MongoDB Community Server zip for Windows from mongodb.com (tested with 9.0.2). Extract it
-   to `%USERPROFILE%\mongodb\`, so that `mongod.exe` is at `%USERPROFILE%\mongodb\<folder>\bin\mongod.exe`.
-   Set `MONGODB_HOME` to use another location.
-2. Start MongoDB and seed everything (idempotent):
-   ```bash
-   python local_mongo.py up
-   ```
-3. Run the app against it. OTPs are printed in this terminal:
-   ```bash
-   python local_mongo.py app
-   ```
-4. Use `python local_mongo.py status`, `stop` and `reset` (drop and reseed) as needed.
+| Command | What it does |
+|---|---|
+| `python start.py` | set up whatever is missing, then start |
+| `python start.py --fresh` | also delete every report, found item, match and claim first |
+| `python start.py stop` | stop the database (if the app was closed some other way) |
 
-Details:
-- MongoDB runs as a **single-node replica set**, so Feature 3's handover uses real multi-document
-  transactions.
-- Data lives in `%USERPROFILE%\mongodb\data`, outside the repository and OneDrive.
-- `.env` is never modified. The local connection string, and a stable `SIGNING_SECRET` when `.env` has
-  none, are passed only to the processes the script starts.
-- To copy the online database's *actual* contents (including user-created reports) once Atlas access
-  works, use `mongodump --uri "<atlas uri>"` followed by
-  `mongorestore --uri "mongodb://127.0.0.1:27017/?replicaSet=rs0"`.
+**Review logins** (printed by `start.py` too):
+
+| Who | Login |
+|---|---|
+| Passenger | Aadhaar **6123 4567 8904**, then PNR **T26100107** (Divya Prakash). The OTP is printed in the `start.py` window (`[MOCK SMS]`). |
+| Depot staff | **Coimbatore Depot**, phone **9000000002**, password **pass123**. It is further along the passenger's route, so the item can be found there (a depot the bus passed before the passenger got off is ruled out by the luggage-path check). Others: Chennai 9000000001, Madurai 9000000003, Salem 9000000004, Tirunelveli 9000000005 |
+
+Review-build settings (in `start.py`): no limits on OTP requests or on claims per day, OTPs printed
+instead of sent, phones can log in over the Wi-Fi without HTTPS. `.env` is optional: copy
+`.env.example` to `.env` only to add `GROQ_API_KEY` (Tamil voice translation, question wording) or
+`OCR_API_KEY`. To send real SMS, set `SMS_PROVIDER=textbee` and `TEXTBEE_API_KEY` there.
+
+If a phone cannot open the QR link, allow Python through the Windows firewall for **private
+networks** (Windows asks the first time) and check the phone is on the same Wi-Fi.
 
 ### 6. Run the Tests
 ```bash
@@ -258,7 +232,7 @@ self-host. To set it up:
 
 This is meant for demos and testing. For production, use a DLT-registered Indian SMS provider.
 
-### Sample PNRs (from `seed_bookings.py`)
+### Sample PNRs (from `seed.py`)
 | PNR | Mobile | Case |
 |---|---|---|
 | `T26100101` | 98765 43210 | confirmed, 2 days ago |
@@ -333,13 +307,11 @@ Pages: `/passenger/reports/<id>`, `/passenger/matches/<id>`, `/passenger/notific
 
 ### Operations
 ```bash
-python seed_matches.py                     # demo data (needs seed_bookings.py first)
 python manage_matches.py run-jobs          # send due notifications once
 python manage_matches.py release-expired   # release expired holds
 python manage_matches.py rerun --report TRK-XXXXXXXX   # or --item <id> / --all-open
 ```
-All of these are idempotent and safe while the app runs. The demo depot login for
-`/staff/review` is phone `9000000101`, password `demo123`. Settings are listed in
+All of these are idempotent and safe while the app runs. Depot logins are listed under *How to Run*. Settings are listed in
 `.env.example`. Set `MOCK_WHATSAPP_FAILURE=transient` to watch retries and the email fallback
 locally.
 
@@ -433,7 +405,7 @@ Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" documen
 |---|---|---|
 | **A. Two-layer login: Aadhaar, then PNR** | `passenger_auth/identity*.py`, `vault.py`, `stores.py`, `templates/passenger_login.html` | Always two layers: (mock) Aadhaar or VID + OTP to the linked phone, then the ticket PNR, whose booking must carry the **same ID token** and name. Both mock databases (UIDAI and PNR) are AES-256-GCM encrypted at rest with blind indexes. Reports keep only an HMAC token and the last 4 digits, purged 7 days after the case closes. |
 | **B. Smart report form** | `index.html`, `static/js/report-form.js`, `photo-input.js`, `vocabulary.py` | Journey filled from the ticket (route, bus, date, boarding stop, seat taken server-side; alighting editable), category, where the item was kept, a match-readiness meter with add-detail chips (English/Tamil/Tanglish), photo dropzone with compression, Tamil voice shown next to its English translation. |
-| **C. Camera scan for depots** | `item_intake/`, `templates/depot_intake.html`, `static/js/intake.js` | "Add new lost item": the webcam or phone camera opens; OpenCV keeps only sharp, well-lit, *new* views (Laplacian variance, exposure, perceptual hash), finds the item (GrabCut), names colours (k-means in Lab + CIEDE2000) and spots text for a close-up. CLIP zero-shot, OCR and offline Florence-2 write the record; it saves automatically. |
+| **C. Camera scan for depots** | `item_intake/`, `templates/depot_intake.html`, `static/js/intake.js` | "Add new lost item": the webcam or phone camera opens; OpenCV keeps only sharp, well-lit, *new* views (Laplacian variance, exposure, perceptual hash), finds the item (GrabCut), names colours (k-means in Lab + CIEDE2000) and spots text for a close-up. CLIP zero-shot, OCR and offline Florence-2 write the record; it saves automatically. **Review build:** the dashboard button is hidden; the backend and `/depot/items/new` still work (next steps: `docs/NEXT_FEATURES.md` on the `Aarav` branch). |
 | **D. Ownership questions v2** | `claims/attributes.py`, `claims/options.py`, `item_intake/questions.py` | Questions only for the kinds of item they suit, phrased with the item's noun ("the backpack's tag"); category-specific questions only when the camera is sure (≥ 0.8, 0.2 ahead). **Contrasting options**: colours an owner cannot mix up (no charcoal/navy/maroon pairs, ΔE00 ≥ 25), about as common as the true one; contents that fit the item. Hidden facts (inside, lock screen, tag name) weigh 2, visible ones ≤ 1; a round only verifies when a hidden fact was right; words the question suggests ("sticker") never count; a multiple-choice question is never repeated. Simulated (`tests/test_questions.py`): co-passenger impostors verified 3.4% (v1 19.8%), owners of items with a hidden fact 88% (v1 79%), no owner locked out. |
 | **E. Luggage path, contacts, slip** | `map.js`, `/api/transport/routes/<id>/downstream`, `loss_slip.html` | Map: travelled part green, the bus's onward journey amber with downstream depot pins and public phone/WhatsApp; 72-hour "where is it now" card; printable loss slip with a QR to a public verify page. `/api/status` no longer exposes names or descriptions. |
 | **F. Pickup re-check** | `claims/service.py`, `staff_claims.html` | Aadhaar claimants give the last 4 digits + an OTP sent to the Aadhaar-linked phone; the custody log keeps only the ID type and last 4. |
@@ -447,8 +419,8 @@ Branch `sem-7-final-eval`. Plan and research: the "Phase 2 Feature Plan" documen
 | Meena Senthil | 7890 1234 5674 | T26100105 | group booking → bound to her own seat |
 | Arun Kumar (VID) | 9123 4567 8901 2346 | T26100101 | same person via Virtual ID |
 
-Run `python seed_bookings.py` (with `SIGNING_SECRET` set) after `seed_transport.py` to link the
-sample tickets to real trips. Phone cameras need HTTPS: `HTTPS_ADHOC=1 HOST=0.0.0.0 python app.py`.
+`python start.py` links the sample tickets to real trips. Phone cameras need HTTPS:
+`HTTPS_ADHOC=1 HOST=0.0.0.0 python app.py`.
 The description writer runs offline on the CPU (Florence-2: about 2 minutes to load the first
 time, about a minute per item); set `INTAKE_VISION_PROVIDER=basic` for instant descriptions.
 
@@ -512,9 +484,8 @@ matching; it is rejected if it adds a colour, brand, content, material or number
 wallets in hands and on cluttered tables, broken umbrellas on wet streets at night, a taped suitcase):
 category right 18/18; main colour in the right family 14/17, but exactly right far less often
 (black → grey/brown), so the camera's colour is never asked without staff confirming it; two
-different black wallets never reach the "same photo" level (max CLIP 0.82 < 0.92). Synthetic phone
-conditions (yellow bus light, tube light, night bus, WhatsApp JPEG, blur, glare, clutter):
-`python tools/stress_media.py`.
+different black wallets never reach the "same photo" level (max CLIP 0.82 < 0.92). The synthetic
+phone-condition stress tools are on the `Aarav` branch.
 
 ---
 

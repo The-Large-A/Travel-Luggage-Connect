@@ -1,40 +1,80 @@
 """
-seed_transport.py — TNSTC Transport Database seeder
-====================================================
-Builds a realistic, normalized transport network in MongoDB from the official
-SETC CSV (data/SETCbustimings_1_0.csv), scaled up with synthetic Tamil Nadu
-data to the target sizes:
+seed.py — every piece of demo data, in one place.
 
-    depots = 100    stops = 3000    routes = 500    buses = 500
-    trips  (from real departure timings)   drivers / conductors (> 500)
-    bus_schedules (one per trip)
+    python start.py            # normal use: start.py seeds a fresh database for you
+    python seed.py             # seed the database in MONGO_URI (needs SIGNING_SECRET)
 
-Follows the same connection pattern as seed_db.py. Reseeding is idempotent AND
-non-destructive: every document is upserted on its natural key and reuses the
-surrogate id it already had, so existing lost/found reports that reference a
-route_id / trip_id / bus_id keep resolving. The existing depot LOGIN accounts
-are preserved (phone/name/password kept) so the current auth flow keeps working
-— that collection is EXPANDED, not replaced.
+What it writes (all idempotent, in this order):
 
-Run:  python seed_transport.py
+  1. Depot logins       the 5 named depot accounts (password pass123), kept by step 2
+  2. Transport network  from the official SETC CSV (data/SETCbustimings_1_0.csv),
+                        scaled up with synthetic Tamil Nadu data: 100 depots,
+                        3000 stops, 500 routes, 500 buses, trips from real
+                        departure timings, drivers, conductors, bus schedules
+  3. Tickets            the mock TNSTC PNR database (AES-256-GCM sealed rows) and the
+                        mock UIDAI (Aadhaar) database, each ticket linked to a real
+                        trip; the ticket's route text is the linked bus route
+
+There are no sample lost reports, found items, matches or claims: the review
+starts from a clean slate. The review login is REVIEW_LOGIN below.
 """
 
 import csv
+import hashlib
 import os
 import re
 import random
-import hashlib
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from pymongo import MongoClient, UpdateOne
 from dotenv import load_dotenv
+from pymongo import MongoClient, UpdateOne
 
 import transport_schema as T
+from passenger_auth import ensure_auth_indexes
+from passenger_auth.identity import SEALED_SCHEMA, booking_id_proof, seed_mock_uidai
+from passenger_auth.identity_service import ensure_identity_indexes
+from passenger_auth.phone import normalize_phone
+from passenger_auth.stores import BOOKINGS, BookingStore, drop_legacy_indexes
+from passenger_auth.timeutil import to_db, today_ist, utcnow
+from passenger_auth.vault import Vault
 
-load_dotenv()
-random.seed(42)  # deterministic, reproducible seed data
+DB_NAME = "tn_bus_lost_found"
+SEED_VERSION = 4                     # bump to make start.py rebuild every local database
 
-CSV_PATH = os.path.join("data", "SETCbustimings_1_0.csv")
+# The passenger and depot accounts handed to the review panel.
+REVIEW_LOGIN = {
+    "passenger": {"name": "Divya Prakash", "aadhaar": "6123 4567 8904", "pnr": "T26100107", "phone": "+91 95000 11122"},
+    # Further along the passenger's route than where they got off, so the item can be there.
+    "depot": {"name": "Coimbatore Depot", "phone": "9000000002", "password": "pass123"},
+}
+
+# ═══ 1. Depot logins ═══════════════════════════════════════════════════════
+# The transport seed (step 2) keeps these phones and passwords for the depot in
+# the same city, so they stay the staff logins.
+DEPOT_LOGINS = [
+    {"phone": "9000000001", "name": "Chennai Depot", "password": "pass123", "stop": "Chennai",
+     "routes": ["ch-co", "ch-md"]},
+    {"phone": "9000000002", "name": "Coimbatore Depot", "password": "pass123", "stop": "Coimbatore",
+     "routes": ["ch-co"]},
+    {"phone": "9000000003", "name": "Madurai Depot", "password": "pass123", "stop": "Madurai",
+     "routes": ["ch-md", "md-tn"]},
+    {"phone": "9000000004", "name": "Salem Depot", "password": "pass123", "stop": "Salem", "routes": ["ch-co"]},
+    {"phone": "9000000005", "name": "Tirunelveli Depot", "password": "pass123", "stop": "Tirunelveli",
+     "routes": ["md-tn"]},
+]
+
+
+def seed_depot_logins(db) -> int:
+    """Only on an empty depots collection (the transport seed then expands it)."""
+    if db[T.DEPOTS].estimated_document_count():
+        return 0
+    db[T.DEPOTS].insert_many([dict(d) for d in DEPOT_LOGINS])
+    return len(DEPOT_LOGINS)
+
+
+# ═══ 2. Transport network ══════════════════════════════════════════════════
+CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "SETCbustimings_1_0.csv")
+
 
 # Target sizes
 N_DEPOTS = 100
@@ -321,13 +361,9 @@ def stable(id_map: dict, *key) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-def main():
-    uri = os.environ.get("MONGO_URI")
-    if not uri:
-        print("MONGO_URI not found in environment")
-        return
-    client = MongoClient(uri)
-    db = client["tn_bus_lost_found"]
+def seed_transport(db):
+    """The transport network (depots, stops, routes, buses, trips, crews, schedules)."""
+    random.seed(42)                     # deterministic, reproducible seed data
 
     print("Applying schema validators...")
     T.apply_validators(db)
@@ -388,13 +424,23 @@ def main():
         used_phones.add(str(phone_seq))
         return str(phone_seq)
 
+    named_cities, claimed_logins = set(), set()
     for code in real_codes:
         home = depot_home[code]
         lat, lon = coord_for(home)
         prior = existing_for_city(home)
+        # A city with several depot codes (Chennai CA/CB/CC) keeps the existing login
+        # for one of them; the others get their own phone and a name with the code,
+        # so no two depots ever share a staff login.
+        if prior and prior["phone"] in claimed_logins:
+            prior = None
+        if prior:
+            claimed_logins.add(prior["phone"])
         phone = prior["phone"] if prior else next_phone()
         password = prior.get("password", "pass123") if prior else "pass123"
-        name = prior.get("name") if prior else f"{home.title()} Depot"
+        name = prior.get("name") if prior else (
+            f"{home.title()} Depot ({code})" if home in named_cities else f"{home.title()} Depot")
+        named_cities.add(home)
         doc = {
             "depot_id": stable(id_depot, code), "depot_code": code, "name": name,
             "phone": phone, "password": password,
@@ -834,6 +880,178 @@ def main():
     for code in real_codes:
         print(f"  {code:5} -> {depot_by_code[code]['city']}")
     print("\nDone.")
+
+
+
+# ═══ 3. Tickets (mock PNR + mock UIDAI databases) ════════════════════════════
+
+# (pnr, seq, name, phone as typed by the booking system, status, route, days ago)
+SAMPLE_BOOKINGS = [
+    ("T26100101", 1, "Arun Kumar",          "9876543210",       "confirmed", "SETC 101 Chennai → Coimbatore",   2),
+    ("T26100102", 1, "Priya Raman",         "+91 94440 12345",  "confirmed", "SETC 133 Chennai → Madurai",      1),
+    ("T26100103", 1, "கார்த்திக் செல்வம்",  "098400-11223",     "confirmed", "SETC 180 Madurai → Tirunelveli",  0),
+    ("T26100104", 1, "Lakshmi Narayanan",   "9003312345",       "cancelled", "SETC 101 Chennai → Coimbatore",   3),
+    ("T26100105", 1, "Senthil Kumar",       "9123456780",       "confirmed", "SETC 122 Chennai → Trichy",       1),
+    ("T26100105", 2, "Meena Senthil",       "91 91234 56780",   "confirmed", "SETC 122 Chennai → Trichy",       1),
+    ("T26100105", 3, "Ravi Senthil",        "8098765432",       "confirmed", "SETC 122 Chennai → Trichy",       1),
+    ("T26100106", 1, "Kavitha Mani",        "7010203040",       "completed", "SETC 101 Chennai → Coimbatore", 120),
+    # The review panel's login (REVIEW_LOGIN): booked yesterday, nothing filed yet.
+    ("T26100107", 1, "Divya Prakash",       "9500011122",       "confirmed", "SETC 101 Chennai → Coimbatore",   1),
+]
+
+# Contact preferences used by Feature 2 notifications: (pnr, seq) → (on WhatsApp?, email).
+# Unlisted passengers: registered phone is on WhatsApp, no email.
+CONTACTS = {
+    ("T26100101", 1): (True, "arun.kumar@example.com"),
+    ("T26100102", 1): (False, "priya.raman@example.com"),    # email only
+    ("T26100105", 3): (False, None),                        # no WhatsApp, no email → in-app only
+}
+
+# Seat per passenger (Phase 2 journey links).
+SEATS = {("T26100101", 1): 12, ("T26100102", 1): 7, ("T26100103", 1): 21, ("T26100104", 1): 3,
+         ("T26100105", 1): 14, ("T26100105", 2): 15, ("T26100105", 3): 16, ("T26100106", 1): 9,
+         ("T26100107", 1): 18}
+
+# The database itself refuses clear-text bookings: only the PNR index, the
+# passenger number, the sealed blob and timestamps may exist on a document.
+BOOKINGS_VALIDATOR = {
+    "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["pnrIndex", "passengerSeq", "sealed"],
+        "additionalProperties": False,
+        "properties": {
+            "_id":          {},
+            "pnrIndex":     {"bsonType": "string"},
+            "passengerSeq": {"bsonType": ["int", "long"]},
+            "sealed":       SEALED_SCHEMA,
+            "createdAt":    {"bsonType": "date"},
+            "updatedAt":    {"bsonType": "date"},
+        },
+    }
+}
+
+
+def booking_store(db, signing_secret, vault=None) -> BookingStore:
+    """The encrypted PNR store, keyed exactly like the app (same SIGNING_SECRET / data keys)."""
+    return BookingStore(db, vault or Vault.from_env(signing_secret))
+
+
+def seed_bookings(db, now=None, signing_secret=None, vault=None) -> int:
+    """
+    Upsert the sample bookings (encrypted) into `db`. Returns the rows written.
+    `signing_secret` must be the app's SIGNING_SECRET: it keys the idProof
+    tokens and, unless DATA_ENCRYPTION_KEYS is set, the encryption itself.
+    """
+    if not signing_secret:
+        raise ValueError("seed_bookings needs the app's SIGNING_SECRET (bookings are encrypted)")
+    now = now or utcnow()
+    today = today_ist(now)
+    store = booking_store(db, signing_secret, vault)
+    drop_legacy_indexes(db)
+    store.migrate_plaintext()
+    for pnr, seq, name, phone, status, route, days_ago in SAMPLE_BOOKINGS:
+        whatsapp, email = CONTACTS.get((pnr, seq), (True, None))
+        fields = {
+            "passengerName":   name,
+            "registeredPhone": normalize_phone(phone),
+            "status":          status,
+            "route":           route,
+            "travelDate":      (today - timedelta(days=days_ago)).isoformat(),
+            "whatsapp":        whatsapp,
+            "email":           email,
+            "idProof":         booking_id_proof(signing_secret, name),
+        }
+        store.upsert(pnr, seq, fields, now=to_db(now))
+    return len(SAMPLE_BOOKINGS)
+
+
+def _route_cities(route_text: str):
+    """'SETC 101 Chennai → Coimbatore' → ('chennai', 'coimbatore')."""
+    parts = re.sub(r"^\s*SETC\s+\S+\s*", "", route_text or "").split("→")
+    if len(parts) != 2:
+        return None, None
+    return parts[0].strip().lower(), parts[1].strip().lower()
+
+
+def _find_route(db, origin: str, dest: str):
+    """Best transport route for a booking's cities: exact ends, else via, else same origin."""
+    rx = lambda c: {"$regex": f"^{re.escape(c)}$", "$options": "i"}   # noqa: E731
+    for query in ({"origin_name": rx(origin), "dest_name": rx(dest)},
+                  {"origin_name": rx(origin), "stop_cities": dest},
+                  {"origin_name": rx(origin)}):
+        route = db.routes.find_one(query, sort=[("route_no", 1)])
+        if route and len(route.get("stop_sequence") or []) >= 3:
+            return route
+    return None
+
+
+def link_bookings_to_transport(db, signing_secret, vault=None) -> int:
+    """
+    Give every sample booking a real journey in the seeded transport network:
+    route, first trip (by departure), board at the origin, alight mid-route (so
+    the bus — and any forgotten bag — continues to downstream depots), and a
+    seat that fits the bus. No-op (returns 0) when the network is not seeded.
+    """
+    store = booking_store(db, signing_secret, vault)
+    linked = 0
+    for pnr, seq, _name, _phone, _status, route_text, _days in SAMPLE_BOOKINGS:
+        origin, dest = _route_cities(route_text)
+        route = _find_route(db, origin, dest) if origin else None
+        if not route:
+            continue
+        trip = db.trips.find_one({"route_id": route["route_id"]}, sort=[("departure_time", 1), ("trip_id", 1)])
+        if not trip:
+            continue
+        bus = db.buses.find_one({"bus_id": trip.get("bus_id")}) or {}
+        seq_ids = route["stop_sequence"]
+        seat = SEATS.get((pnr, seq), 10)
+        capacity = int(bus.get("capacity") or 40)
+        store.upsert(pnr, seq, {
+            # The ticket names the bus route it is linked to, so the passenger's
+            # dashboard and their reports always show the same route.
+            "route": f"SETC {route.get('route_no')} {route.get('origin_name')} → {route.get('dest_name')}",
+            "routeId": route["route_id"], "tripId": trip["trip_id"],
+            "boardingStopId": seq_ids[0], "alightingStopId": seq_ids[max(1, len(seq_ids) // 2)],
+            "seatNo": min(seat, capacity),
+        })
+        linked += 1
+    return linked
+
+
+def apply_bookings_validator(db) -> None:
+    """Lenient validator (moderate level) so the collection behaves like a table."""
+    if BOOKINGS in db.list_collection_names():
+        db.command("collMod", BOOKINGS, validator=BOOKINGS_VALIDATOR, validationLevel="moderate")
+    else:
+        db.create_collection(BOOKINGS, validator=BOOKINGS_VALIDATOR, validationLevel="moderate")
+
+
+# ═══ All of it ═════════════════════════════════════════════════════════════
+def seed_all(db, signing_secret, vault=None) -> dict:
+    """Steps 1-3 into `db`. `signing_secret` must be the app's SIGNING_SECRET."""
+    vault = vault or Vault.from_env(signing_secret)
+    logins = seed_depot_logins(db)
+    print("Transport network:")
+    seed_transport(db)
+    rows = seed_bookings(db, signing_secret=signing_secret, vault=vault)
+    citizens = seed_mock_uidai(db, signing_secret, vault=vault)
+    apply_bookings_validator(db)
+    ensure_auth_indexes(db)
+    ensure_identity_indexes(db)
+    linked = link_bookings_to_transport(db, signing_secret, vault=vault)
+    db["seed_info"].replace_one({"_id": "seed"}, {"_id": "seed", "version": SEED_VERSION,
+                                                  "seededAt": to_db(utcnow())}, upsert=True)
+    print(f"Tickets: {rows} booking rows, {citizens} mock Aadhaar citizens, {linked} linked to real trips.")
+    return {"depotLogins": logins, "bookings": rows, "citizens": citizens, "linked": linked}
+
+
+def main():
+    load_dotenv()
+    uri = os.environ.get("MONGO_URI")
+    secret = (os.environ.get("SIGNING_SECRET") or "").strip()
+    if not uri or len(secret) < 32:
+        raise SystemExit("Set MONGO_URI and SIGNING_SECRET (32+ chars), or just run `python start.py`.")
+    seed_all(MongoClient(uri)[DB_NAME], secret)
 
 
 if __name__ == "__main__":

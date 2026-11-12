@@ -307,14 +307,14 @@ def test_cooldown_gate(db, clock):
 
 # ── Seed data and record cleanup ─────────────────────────────────────────────
 def test_seed_is_idempotent_and_covers_policy_cases(db, clock):
-    from seed_bookings import seed_bookings
+    from seed import seed_bookings
     seed_bookings(db, now=clock(), signing_secret=TEST_SECRET)          # second run: no duplicates
     store = BookingStore(db, Vault.from_env(TEST_SECRET))
     rows = store.all_rows()
-    assert db.bookings.count_documents({}) == 8 and len(rows) == 8
+    assert db.bookings.count_documents({}) == 9 and len(rows) == 9      # 8 samples + the review login
     assert len(store.rows("T26100105")) == 3
     assert sum(r["status"] == "cancelled" for r in rows) == 1
-    assert len({r["pnr"] for r in rows}) == 6
+    assert len({r["pnr"] for r in rows}) == 7
     assert all(r["registeredPhone"].startswith("+91") for r in rows)
     assert all(r["idProof"]["type"] == "aadhaar" for r in rows)       # everyone can pass both layers
 
