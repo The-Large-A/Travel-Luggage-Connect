@@ -23,7 +23,6 @@ import secrets
 import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from difflib import SequenceMatcher
 
 from itsdangerous import BadSignature, URLSafeSerializer
 from pymongo import ReturnDocument
@@ -65,26 +64,61 @@ class IdentitySession:
         return mask_id(self.last4)
 
 
+# Titles that are not part of a person's name (English, Tamil, Hindi usage).
+HONORIFICS = frozenset({"mr", "mrs", "ms", "miss", "mx", "dr", "prof", "shri", "shree", "smt", "kumari", "kum",
+                        "thiru", "thirumathi", "tmt", "selvi", "master", "baby", "er", "adv", "sir", "madam",
+                        "திரு", "திருமதி", "செல்வி"})
+NAME_MATCH_MIN = 0.90
+
+
 def _name_tokens(name) -> list:
+    """Case-folded name words without honorifics, punctuation or digits."""
     text = unicodedata.normalize("NFC", str(name or "")).casefold()
-    return [t for t in re.split(r"[^\w]+", text) if t and not t.isdigit()]
+    words = [t for t in re.split(r"[^\w]+", text) if t and not t.isdigit()]
+    return [t for t in words if t not in HONORIFICS]
 
 
-def names_match(a, b) -> bool:
+def _levenshtein(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _expand_initials(ta, tb):
+    """'arun k' vs 'arun kumar': a single-letter initial stands for the other side's word."""
+    out = []
+    pool = [t for t in tb if len(t) > 1]
+    for t in ta:
+        full = next((w for w in pool if len(t) == 1 and w.startswith(t)), None)
+        out.append(full or t)
+        if full:
+            pool.remove(full)
+    return out
+
+
+def name_similarity(a, b) -> float:
     """
-    Booking name vs UIDAI name. Accepts identical names, initials/abbreviations
-    ("Arun K" ~ "Arun Kumar") and small spelling differences, so the same person
-    is not turned away for how a booking clerk typed the name.
+    0..1 similarity of two person names: honorifics stripped, case and spacing
+    ignored, word order ignored ("Kumar Arun" = "Arun Kumar"), single-letter
+    initials allowed for a whole word ("Arun K" = "Arun Kumar"), then normalised
+    Levenshtein over the longer name. Strict on purpose: "Rajan" vs "Rajani" is
+    0.83, a different person.
     """
     ta, tb = _name_tokens(a), _name_tokens(b)
     if not ta or not tb:
-        return False
-    if ta == tb:
-        return True
-    short, long_ = sorted((ta, tb), key=len)
-    if len(short) <= len(long_) and all(l.startswith(s) for s, l in zip(short, long_)):
-        return True
-    return SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio() >= 0.85
+        return 0.0
+    ta, tb = _expand_initials(ta, tb), _expand_initials(tb, ta)
+    x, y = " ".join(sorted(ta)), " ".join(sorted(tb))
+    return 1.0 - _levenshtein(x, y) / max(len(x), len(y))
+
+
+def names_match(a, b) -> bool:
+    """Booking name vs UIDAI name: the same person at >= 90% name similarity."""
+    return name_similarity(a, b) >= NAME_MATCH_MIN
 
 
 class IdentityService:
@@ -278,19 +312,26 @@ class IdentityService:
                                      {"$set": {"revokedAt": to_db(self.clock())}})
 
     # ── PNR binding (second factor: proof of journey) ────────────────────────
-    def link_pnr(self, identity: IdentitySession, pnr_raw):
+    def link_pnr(self, identity: IdentitySession, pnr_raw, ip=None):
         """
         Returns (BookingMatch, passengerSeq) for the passenger on `pnr` whose
         booking ID token equals this identity's token and whose name agrees.
         """
         pnr = parse_pnr(pnr_raw)
+        if ip:
+            self._ip_limit("ip-id-link", ip, self.config.pnr_ip_limit)     # PNR checks per IP per hour
         count, retry = self.limiter.recent_events("id-link", identity.aadhaar_token, 3600)
         if count >= LINK_ATTEMPTS_PER_HOUR:
             raise AuthError(429, "link_limit", "Too many PNR attempts. Please try again later.", retry_after=retry)
         self.limiter.record_event("id-link", identity.aadhaar_token, 3600)
         rows = [d for d in self.bookings.rows(pnr)
                 if (d.get("idProof") or {}).get("token") == identity.aadhaar_token]
-        if not rows or not names_match(rows[0].get("passengerName"), identity.name):
+        if not rows:
+            raise AuthError(404, "pnr_not_linked", NOT_LINKED_MESSAGE)
+        score = name_similarity(rows[0].get("passengerName"), identity.name)
+        if score < NAME_MATCH_MIN:
+            logger.warning("PNR %s refused for identity %s: name similarity %.2f < %.2f.", pnr,
+                           mask_id(identity.last4), score, NAME_MATCH_MIN)
             raise AuthError(404, "pnr_not_linked", NOT_LINKED_MESSAGE)
         row = rows[0]
         today = today_ist(self.clock())

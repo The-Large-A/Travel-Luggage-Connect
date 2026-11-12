@@ -24,7 +24,8 @@ ENV = {
     "MONGO_URI": "mongodb://localhost:27017", "SECRET_KEY": "e2e-secret",
     "SIGNING_SECRET": "e2e-signing-secret-0123456789-abcdefghijklmnop",
     "SMS_PROVIDER": "mock", "WHATSAPP_PROVIDER": "mock", "EMAIL_PROVIDER": "mock",
-    "MOCK_WHATSAPP_FAILURE": "none", "MOCK_EMAIL_FAILURE": "none",
+    "MOCK_WHATSAPP_FAILURE": "none", "MOCK_EMAIL_FAILURE": "none", "HANDOVER_ASYNC": "0",
+    "OTP_IP_REQUEST_LIMIT": "1000", "PNR_IP_LIMIT": "1000", "OTP_IP_VERIFY_LIMIT": "1000",
     "NOTIFY_WORKER_ENABLED": "0", "APP_BASE_URL": "https://lostfound.tnstc.example",
     "TWILIO_ACCOUNT_SID": "", "TWILIO_AUTH_TOKEN": "", "TWILIO_PHONE_NUMBER": "",
     "OCR_API_KEY": "", "GROQ_API_KEY": "", "FLASK_DEBUG": "0",
@@ -248,6 +249,16 @@ def test_depot_resolve_reserves_item_and_rejects_inactive(e2e):
     depot.post("/depot/login", data={"phone": "9000000004", "password": "pass123"})
     _log_found(depot, "red umbrella", "Umbrella", _today())
     match = db.matches.find_one()
+    # The anti-fraud gate: no handover before the counter security check.
+    refused = depot.post("/api/match/resolve", json={"match_id": str(match["_id"])})
+    assert refused.status_code == 409 and refused.get_json()["code"] == "security_check_required"
+    state = depot.get(f"/api/matches/{match['_id']}/security-questions").get_json()
+    assert state["state"] == "staff_check"                     # "red umbrella": too few reliable details...
+    after = depot.post(f"/api/matches/{match['_id']}/security-staff-check",
+                       json={"picks": {}, "added": [], "staffName": "R. Selvi"}).get_json()
+    assert after["state"] == "insufficient"                    # ...and staff added none: ID check instead
+    assert depot.post(f"/api/matches/{match['_id']}/security-override",
+                      json={"staffName": "R. Selvi", "idChecked": True}).get_json()["state"] == "passed"
     resp = depot.post("/api/match/resolve", json={"match_id": str(match["_id"])})
     assert resp.status_code == 200
     assert db.found_reports.find_one()["status"] == "resolved"

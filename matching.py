@@ -210,7 +210,10 @@ class Matcher:
         return [os.path.join(self.image_root, p) for p in rel[:8]]
 
     def raw(self, found, lost) -> dict:
-        desc, notes = _text(lost.get("description")), found_text(found)
+        # SBERT compares the LLM-cleaned copies when they exist (less noise); every
+        # fact rule below still reads the originals.
+        desc = _text(lost.get("descriptionEnhanced")) or _text(lost.get("description"))
+        notes = _text(found.get("notesEnhanced")) or found_text(found)
         text = self.text_sim.similarity(desc, notes) if desc.strip() and notes.strip() else None
         image = cross = None
         if getattr(self.image_sim, "available", False):
@@ -349,6 +352,12 @@ class Matcher:
                 scanned[c["name"]] = scanned.get(c["name"], 0.0) + float(c["share"])
         return scanned or {c: 1.0 for c in ff.colours}
 
+    @staticmethod
+    def _scanned(found) -> bool:
+        """The found item's colours came from the camera, not from what staff typed."""
+        return any(isinstance(c, dict) and c.get("name") for c in
+                   ((found.get("attributes") or {}).get("colours") or []))
+
     def _colours(self, ev, found, lf, ff):
         lc, shares = set(lf.colours), self._found_colours(found, ff)
         if not lc or not shares:
@@ -370,6 +379,14 @@ class Matcher:
                 ev.add("description", "colour_main", -1.0, f"the item is mostly {main}, which the report does not say")
         elif any(colours_confusable(a, b) for a in lc for b in fc):
             ev.add("description", "colour", -0.5, f"{'/'.join(sorted(lc))} vs {'/'.join(sorted(fc))} (close shades)")
+        elif self._scanned(found):
+            # Colours READ BY THE CAMERA are often wrong on real photos (an open laptop
+            # reads as its black screen, thin frames as the background, yellow bus light
+            # shifts everything): ~70% right on clean photos, ~60% on a night bus. So a
+            # mismatch is weak evidence, P(mismatch | same) ≈ 0.3 vs 0.8 → log2 ≈ -1.4,
+            # and never a hard contradiction that would block the true owner.
+            ev.add("description", "colour", -1.4,
+                   f"{'/'.join(sorted(lc))} reported; the camera read {'/'.join(sorted(fc))}")
         else:
             ev.add("description", "colour_conflict", -2.5,
                    f"{'/'.join(sorted(lc))} was lost, {'/'.join(sorted(fc))} was found", "conflict")

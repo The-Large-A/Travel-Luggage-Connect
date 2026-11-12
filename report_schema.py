@@ -20,7 +20,10 @@ LOST_REPORTS_VALIDATOR = {"$jsonSchema": {"bsonType": "object", "properties": {
     "storageLocation":     {"enum": sorted(STORAGE_KEYS) + [None]},
     "descriptionOriginal": {"bsonType": ["string", "null"], "maxLength": 1000},
     "descriptionLang":     {"enum": ["en", "ta", "hi"]},
-    "detailScore":         {"enum": [0, 25, 50, 75, 100]},
+    # 0-100: the strength meter scores over the factors that apply to the item (e.g. 40, 67).
+    "detailScore":         {"bsonType": ["int", "long"], "minimum": 0, "maximum": 100},
+    "descriptionEnhanced": {"bsonType": ["string", "null"], "maxLength": 3000},
+    "qrImagePath":         {"bsonType": "string", "pattern": "^uploads/qr/[A-Za-z0-9_-]+\.svg$"},
     "ticketType":          {"enum": ["pnr", "general"]},
     "alightingChanged":    {"bsonType": "bool"},
     "ownerIdentity":       _IDENTITY,
@@ -30,6 +33,7 @@ FOUND_REPORTS_VALIDATOR = {"$jsonSchema": {"bsonType": "object", "properties": {
     "category":    {"enum": list(CATEGORIES)},
     "images":      {"bsonType": "array", "items": {"bsonType": "string"}},
     "captureMode": {"enum": ["manual", "camera_scan"]},
+    "notesEnhanced": {"bsonType": ["string", "null"], "maxLength": 3000},
 }}}
 
 ITEM_DRAFTS_VALIDATOR = {"$jsonSchema": {"bsonType": "object",

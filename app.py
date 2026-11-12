@@ -27,14 +27,15 @@ import matching
 from notifications import notification_service
 import transport_schema as T
 from passenger_auth import init_passenger_auth, require_passenger
-from passenger_auth.phone import try_normalize_phone
+import description_enhancer
+from passenger_auth.phone import mask_phone, try_normalize_phone
 from passenger_auth.timeutil import to_db, utcnow, fmt_ist
 from match_notify import init_match_notify, ACTIVE_STATUSES as MATCH_ACTIVE_STATUSES
 from match_notify.service import seq_visible
 from claims import init_claims, CATEGORIES as ITEM_CATEGORIES, ATTRIBUTES as PRIVATE_ATTRIBUTES
 from claims import encode_private_attributes, new_tag_id
 from claims.options import build_choices
-from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, detail_slots,
+from vocabulary import (CATEGORY_LABELS, STORAGE_KEYS, STORAGE_LOCATIONS, description_strength,
                         vocabulary_payload)
 from item_intake import init_item_intake
 from report_schema import apply_phase2_validators
@@ -143,6 +144,39 @@ image_sim = ImageSimilarity(db=db)
 ocr_ext   = OCRExtractor()
 matcher   = matching.Matcher(text_sim, image_sim, image_root="static")
 logger.info(f"CLIP available: {image_sim.available}")
+
+# Counter check before a depot hands an item over (security questions; handover_service.py).
+from handover_service import HandoverError, HandoverService, resolve_allowed       # noqa: E402
+from passenger_auth.ratelimit import RateLimiter                                    # noqa: E402
+handover = HandoverService(
+    db, "static", image_sim, claims_service.answer_key, claims_state.config,
+    use_llm=bool(os.environ.get("GROQ_API_KEY")),
+    async_jobs=os.environ.get("HANDOVER_ASYNC", "1") != "0")
+security_limiter = RateLimiter(db, utcnow)
+
+# Encrypted QR on lost-report slips (Fernet; tracking_qr.py). The key comes from
+# QR_FERNET_KEY, else it is derived from the app's signing secret.
+from tracking_qr import QRError, TrackingQR, MAX_AGE_SECONDS as QR_MAX_AGE_SECONDS   # noqa: E402
+tracking_qr = TrackingQR({**os.environ, "SIGNING_SECRET": app.extensions["passenger_auth"].config.signing_secret})
+QR_FOLDER = os.path.join('static', 'uploads', 'qr')
+QR_VERIFY_LIMIT = 30          # scans per IP per 10 minutes
+
+
+def tracking_qr_url(report) -> str:
+    """The URL a phone camera opens: an encrypted token, never the tracking ID itself."""
+    token = tracking_qr.issue(report["tracking_id"], report["request_id"])
+    return url_for('verify_report_qr', token=token, _external=True)
+
+
+def save_tracking_qr(report):
+    """Write the report's QR (SVG) under static/uploads/qr/ and return its relative path."""
+    os.makedirs(QR_FOLDER, exist_ok=True)
+    name = f"{report['request_id']}.svg"
+    with open(os.path.join(QR_FOLDER, name), "w", encoding="utf-8") as fh:
+        fh.write(claims_service.qr_svg(tracking_qr_url(report)))
+    return f"uploads/qr/{name}"
+# Per depot (staff session) and per IP, per 10 minutes.
+SECURITY_LIMITS = {"questions": 60, "staff-check": 30, "answers": 20, "override": 10}
 
 # File Upload
 UPLOAD_FOLDER = os.path.join('static', 'uploads')
@@ -444,7 +478,9 @@ def _save_match(found_report: dict, lost: dict, score: dict) -> bool:
     background worker. Duplicate triggers are no-ops. Returns True if a new match
     document was created.
     """
-    _, is_new = match_notifier.record_match(found_report, lost, score)
+    match, is_new = match_notifier.record_match(found_report, lost, score)
+    if is_new and match is not None:
+        handover.pregenerate(match["_id"])          # questions ready before staff press resolve
     return is_new
 
 
@@ -589,7 +625,8 @@ def get_matches_for_depot(depot_phone: str) -> list:
 def index():
     """Passenger homepage: report form + Leaflet map."""
     last_tracking_id = session.pop('last_tracking_id', None)
-    return render_template('index.html', last_tracking_id=last_tracking_id,
+    last_qr = session.pop('last_qr', None)
+    return render_template('index.html', last_tracking_id=last_tracking_id, last_qr=last_qr,
                            storage_locations=STORAGE_LOCATIONS, category_labels=CATEGORY_LABELS)
 
 
@@ -776,6 +813,9 @@ def submit_lost():
         "source":            stops_map.get(boarding_stop_id, ""),
         "destination":       stops_map.get(alighting_stop_id, ""),
         "description":       description,
+        # A cleaned copy for the text matcher only (never replaces the original; None if
+        # no LLM is configured or the rewrite would have added a fact).
+        "descriptionEnhanced": description_enhancer.enhance(description),
         "phone":             phone,
         "name":              name,
         "ownerPnr":          passenger.pnr,     # object-level authorization (Feature 2)
@@ -790,7 +830,7 @@ def submit_lost():
         "storageLocation":     storage_location,
         "descriptionOriginal": description_original,   # e.g. the spoken Tamil, kept beside the English
         "descriptionLang":     description_lang,
-        "detailScore":         detail_slots(description, category)["score"],
+        "detailScore":         description_strength(description, category)["score"],
         "ticketType":          "pnr",
         "passengerSeq":        (row or {}).get("passengerSeq"),
         "autofilled":          autofilled,
@@ -808,6 +848,13 @@ def submit_lost():
            f'save it to check your claim status. We will notify you if a depot finds a likely match.')
     flash(msg, 'success')
     session['last_tracking_id'] = tracking_id
+    try:                                   # an encrypted QR the passenger can save (72 h; the slip reissues it)
+        qr_path = save_tracking_qr(report)
+        lost_collection.update_one({"request_id": report["request_id"]},
+                                   {"$set": {"qrImagePath": qr_path, "qrIssuedAt": to_db(utcnow())}})
+        session['last_qr'] = qr_path
+    except Exception:
+        logger.exception("Could not create the QR for report %s.", tracking_id)
     return redirect(url_for('index'))
 
 
@@ -979,6 +1026,7 @@ def create_found_report(depot: dict, data: dict, image_paths=(), raw_attributes=
         "found_seat_area": found_seat_area,
         "date":            date,
         "notes":           notes,             # private: staff only
+        "notesEnhanced":   description_enhancer.enhance(notes),   # cleaned copy for the text matcher
         "public_description": public_description[:120],   # the only text passengers see
         "category":        category,
         "private_attributes": private_attributes,          # hashed claim-verification answers
@@ -1087,7 +1135,7 @@ def loss_slip(tracking_id):
     report = _owned_report(tracking_id, g.passenger)
     if not report:
         return render_template('passenger_not_found.html'), 404
-    verify_url = url_for('verify_report', tracking_id=report["tracking_id"], _external=True)
+    verify_url = tracking_qr_url(report)          # encrypted; a fresh 72-hour token every time it is printed
     stops = {s["stop_id"]: s["name"] for s in route_stops(get_route(report.get("route_id")) or {})}
     return render_template(
         'loss_slip.html', report=report, verify_url=verify_url,
@@ -1105,6 +1153,66 @@ def verify_report(tracking_id):
     report = lost_collection.find_one({"tracking_id": (tracking_id or "").strip().upper()})
     return render_template('verify_report.html', report=report, tracking_id=tracking_id.upper()[:20]), \
         (200 if report else 404)
+
+
+def _qr_rate_limited():
+    ip = request.remote_addr or 'unknown'
+    count, retry = security_limiter.recent_events("qr-verify", ip, 600)
+    if count >= QR_VERIFY_LIMIT:
+        logger.warning("QR verify rate limit hit.")
+        return retry or 60
+    security_limiter.record_event("qr-verify", ip, 600)
+    return 0
+
+
+def _qr_status(data) -> dict:
+    """What a valid QR may tell anyone holding the slip: status only, no names or descriptions."""
+    report = lost_collection.find_one({"request_id": data["r"], "tracking_id": data["t"]}) or {}
+    if not report:
+        return {}
+    claim = claims_service.claims.find_one({"reportId": report["request_id"]}, sort=[("createdAt", -1)]) or {}
+    return {"trackingId": report.get("tracking_id"), "status": report.get("status", "pending"),
+            "routeName": report.get("route_name"), "date": report.get("date"),
+            "claimStatus": claim.get("status"), "issuedAt": data["ts"],
+            "expiresAt": data["ts"] + QR_MAX_AGE_SECONDS}
+
+
+@app.route('/verify/q/<path:token>')
+def verify_report_qr(token):
+    """Page a phone opens from the encrypted QR: decrypts it, checks its age, shows the status."""
+    if _qr_rate_limited():
+        return render_template('verify_report.html', report=None, tracking_id='', qr_error='rate_limited'), 429
+    try:
+        data = tracking_qr.read(token)
+    except QRError as e:
+        logger.info("QR scan rejected: %s.", e.reason)
+        return render_template('verify_report.html', report=None, tracking_id='', qr_error=e.reason), \
+            (410 if e.reason == "expired" else 400)
+    report = lost_collection.find_one({"request_id": data["r"], "tracking_id": data["t"]})
+    return render_template('verify_report.html', report=report, tracking_id=data["t"], qr_error=None), \
+        (200 if report else 404)
+
+
+@app.route('/api/qr/verify', methods=['POST'])
+def api_qr_verify():
+    """Scanned QR payload (the token or the whole URL) → decrypted, age-checked, status."""
+    retry = _qr_rate_limited()
+    if retry:
+        return jsonify({"valid": False, "reason": "rate_limited", "retryAfterSeconds": retry}), 429
+    body = request.get_json(silent=True) or {}
+    payload = body.get("payload")
+    if not isinstance(payload, str) or not payload.strip():
+        return jsonify({"valid": False, "reason": "malformed"}), 400
+    token = payload.strip().rsplit("/verify/q/", 1)[-1]
+    try:
+        data = tracking_qr.read(token)
+    except QRError as e:
+        logger.info("QR verify rejected: %s.", e.reason)
+        return jsonify({"valid": False, "reason": e.reason}), (410 if e.reason == "expired" else 400)
+    status = _qr_status(data)
+    if not status:
+        return jsonify({"valid": False, "reason": "not_found"}), 404
+    return jsonify({"valid": True, **status})
 
 
 @app.route('/api/transport/routes/<route_id>/downstream')
@@ -1405,6 +1513,102 @@ def api_translate():
         logger.error(f"Translation error ({GROQ_MODEL}): {e}")
         return jsonify({'error': 'Translation failed. Your original text is kept.', 'code': 'failed'}), 502
 
+# ── Counter security questions (anti-fraud gate before resolve) ─────────────
+def _security_guard(kind):
+    """(depot_phone, error_response) — staff session + per-depot and per-IP rate limits."""
+    phone = session.get('depot_phone')
+    if not phone:
+        return None, (jsonify({"ok": False, "error": {"code": "not_authenticated",
+                                                       "message": "Not authenticated"}}), 401)
+    limit = SECURITY_LIMITS[kind]
+    for ident in (f"depot:{phone}", f"ip:{request.remote_addr or 'unknown'}"):
+        count, retry = security_limiter.recent_events(f"security-{kind}", ident, 600)
+        if count >= limit:
+            logger.warning("Security %s rate limit hit for %s.", kind, ident.split(':')[0])
+            resp = jsonify({"ok": False, "error": {"code": "rate_limited",
+                                                    "message": "Too many requests. Please wait a few minutes.",
+                                                    "retryAfterSeconds": retry}})
+            return None, (resp, 429)
+    for ident in (f"depot:{phone}", f"ip:{request.remote_addr or 'unknown'}"):
+        security_limiter.record_event(f"security-{kind}", ident, 600)
+    return phone, None
+
+
+def _security_call(kind, fn, *args):
+    phone, error = _security_guard(kind)
+    if error:
+        return error
+    try:
+        return jsonify({"ok": True, **fn(*args, phone)})
+    except HandoverError as e:
+        return jsonify({"ok": False, "error": {"code": e.code, "message": e.message, **e.extra}}), e.status
+    except Exception:
+        logger.exception("Security %s failed.", kind)
+        return jsonify({"ok": False, "error": {"code": "server_error",
+                                               "message": "Something went wrong. Try again."}}), 500
+
+
+@app.route('/api/matches/<match_id>/security-questions', methods=['GET'])
+def security_questions(match_id):
+    """The check's state; questions only as text + options (never which one is right)."""
+    return _security_call("questions", lambda mid, phone: handover.state(mid, phone), match_id)
+
+
+@app.route('/api/matches/<match_id>/security-staff-check', methods=['POST'])
+def security_staff_check(match_id):
+    """Staff, holding the item, confirm photo-derived answers and may add questions."""
+    body = request.get_json(silent=True) or {}
+    picks = body.get("picks") if isinstance(body.get("picks"), dict) else {}
+    added = body.get("added") if isinstance(body.get("added"), list) else []
+    staff = body.get("staffName") if isinstance(body.get("staffName"), str) else ""
+    return _security_call("staff-check", lambda mid, phone: handover.staff_check(mid, phone, picks, added, staff),
+                          match_id)
+
+
+@app.route('/api/matches/<match_id>/security-answers', methods=['POST'])
+def security_answers(match_id):
+    """The claimant's answers: returns only pass / escalate / fail / locked."""
+    body = request.get_json(silent=True) or {}
+    answers = body.get("answers") if isinstance(body.get("answers"), dict) else None
+    if answers is None:
+        return jsonify({"ok": False, "error": {"code": "invalid_answers", "message": "Answer every question."}}), 400
+    return _security_call("answers", lambda mid, phone: handover.submit(mid, phone, answers), match_id)
+
+
+@app.route('/api/matches/<match_id>/security-override', methods=['POST'])
+def security_override(match_id):
+    """After an escalation (or with too few questions): staff called / checked photo ID."""
+    body = request.get_json(silent=True) or {}
+    return _security_call("override", lambda mid, phone: handover.override(
+        mid, phone, body.get("staffName"), body.get("idChecked"), body.get("idLast4")), match_id)
+
+
+@app.route('/api/description/enhance', methods=['POST'])
+def api_description_enhance():
+    """
+    Preview the cleaned description the matcher will use (logged-in passengers or
+    depot staff only, so the API key cannot be used anonymously; 20 per 10 min).
+    """
+    if 'depot_phone' not in session:
+        from passenger_auth.routes import authenticate_request
+        try:
+            authenticate_request()                     # a valid two-layer passenger session
+        except Exception:
+            return jsonify({"ok": False, "error": {"code": "not_authenticated", "message": "Log in first."}}), 401
+    ident = request.remote_addr or 'unknown'
+    count, retry = security_limiter.recent_events("describe", ident, 600)
+    if count >= 20:
+        return jsonify({"ok": False, "error": {"code": "rate_limited", "message": "Too many requests.",
+                                               "retryAfterSeconds": retry}}), 429
+    security_limiter.record_event("describe", ident, 600)
+    body = request.get_json(silent=True) or {}
+    text = body.get("text")
+    if not isinstance(text, str) or not 3 <= len(text.strip()) <= 2000:
+        return jsonify({"ok": False, "error": {"code": "invalid_text", "message": "Send 3-2000 characters."}}), 400
+    enhanced = description_enhancer.enhance(text)
+    return jsonify({"ok": True, "enhanced": enhanced, "used": bool(enhanced)})
+
+
 @app.route('/api/match/resolve', methods=['POST'])
 def resolve_match():
     """
@@ -1450,6 +1654,14 @@ def resolve_match():
     if item.get("status") not in (None, "open"):
         return jsonify({"success": False,
                         "message": "This item is reserved by a passenger claim; use the claims desk."}), 409
+    # Anti-fraud gate: nothing is handed over until the claimant passed the counter
+    # questions (or staff verified them after an escalation). Enforced here, not
+    # only in the page, so the check cannot be skipped by calling this route.
+    if not resolve_allowed(match):
+        logger.warning("Resolve refused for match %s: security check not passed (depot %s).",
+                       match_id, mask_phone(depot_phone))
+        return jsonify({"success": False, "code": "security_check_required",
+                        "message": "Ask the claimant the security questions first."}), 409
 
     request_id = match["request_id"]   # trusted: comes from the match document
 

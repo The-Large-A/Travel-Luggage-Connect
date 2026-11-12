@@ -7,6 +7,12 @@
     <div class="card-professional p-8 space-y-4 text-center">
         <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Loss slip verification</p>
         <p class="mono text-2xl font-bold tracking-widest">{{ tracking_id }}</p>
+        {% if qr_error %}
+        <p class="p-3 rounded-md border text-sm {{ 'bg-amber-50 border-amber-200 text-amber-900' if qr_error == 'expired' else 'bg-red-50 border-red-200 text-tn-red' }}" role="alert">
+            {% if qr_error == 'expired' %}This QR code is older than 72 hours. Open the report in the app to print a fresh slip.
+            {% elif qr_error == 'rate_limited' %}Too many scans from this network. Please wait a few minutes.
+            {% else %}This QR code is not a valid TNSTC loss slip, or it has been altered.{% endif %}</p>
+        {% endif %}
         {% if report %}
         <p class="inline-block px-3 py-1 rounded-full bg-green-100 text-green-800 text-xs font-bold uppercase">✔ Genuine report</p>
         <dl class="grid grid-cols-2 gap-3 text-sm text-left pt-2">

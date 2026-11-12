@@ -120,7 +120,7 @@ def sms():
 
 
 def make_config(**overrides):
-    base = dict(signing_secret=TEST_SECRET, otp_ip_request_limit=1000, otp_ip_verify_limit=1000)
+    base = dict(signing_secret=TEST_SECRET, otp_ip_request_limit=1000, otp_ip_verify_limit=1000, pnr_ip_limit=1000)
     base.update(overrides)
     return AuthConfig(**base)
 

@@ -51,7 +51,8 @@ class AuthConfig:
     otp_cooldown_minutes: int = 15
     otp_resend_seconds: int = 30
     otp_max_requests_per_pnr_per_hour: int = 5
-    otp_ip_request_limit: int = 20
+    otp_ip_request_limit: int = 5            # Aadhaar checks (OTP requests) per IP per window
+    pnr_ip_limit: int = 10                   # PNR checks per IP per window
     otp_ip_verify_limit: int = 30
     otp_ip_window_seconds: int = 3600
     session_ttl_seconds: int = 1800
@@ -106,7 +107,8 @@ class AuthConfig:
             otp_cooldown_minutes=_int(env, "OTP_COOLDOWN_MINUTES", 15, 1, 1440),
             otp_resend_seconds=_int(env, "OTP_RESEND_SECONDS", 30, 5, 600),
             otp_max_requests_per_pnr_per_hour=_int(env, "OTP_MAX_REQUESTS_PER_PNR_PER_HOUR", 5, 1, 50),
-            otp_ip_request_limit=_int(env, "OTP_IP_REQUEST_LIMIT", 20, 1, 10000),
+            otp_ip_request_limit=_int(env, "OTP_IP_REQUEST_LIMIT", 5, 1, 10000),
+            pnr_ip_limit=_int(env, "PNR_IP_LIMIT", 10, 1, 10000),
             otp_ip_verify_limit=_int(env, "OTP_IP_VERIFY_LIMIT", 30, 1, 10000),
             otp_ip_window_seconds=_int(env, "OTP_IP_WINDOW_SECONDS", 3600, 60, 86400),
             session_ttl_seconds=_int(env, "SESSION_TTL", 1800, 60, 86400),

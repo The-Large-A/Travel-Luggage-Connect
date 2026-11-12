@@ -163,7 +163,7 @@ def reset():
 # local runner relaxes the per-number / per-IP OTP limits (production keeps the
 # strict defaults). Anything set in the shell environment still wins.
 DEMO_LIMITS = {"OTP_MAX_REQUESTS_PER_PNR_PER_HOUR": "30", "OTP_IP_REQUEST_LIMIT": "300",
-               "OTP_IP_VERIFY_LIMIT": "500", "OTP_RESEND_SECONDS": "10"}
+               "OTP_IP_VERIFY_LIMIT": "500", "OTP_RESEND_SECONDS": "10", "PNR_IP_LIMIT": "300"}
 
 
 def app():

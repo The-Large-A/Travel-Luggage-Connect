@@ -30,7 +30,8 @@ def _items():
 
 
 ITEMS = _items()
-IMAGES = [i for i in ITEMS if i["kind"] == "image"]
+IMAGES = [i for i in ITEMS if i["kind"] == "image" and not i.get("candid")]
+CANDID = [i for i in ITEMS if i.get("candid")]           # everyday photos, not product shots
 VIDEOS = [i for i in ITEMS if i["kind"] == "video"]
 pytestmark = pytest.mark.skipif(len(IMAGES) < 30, reason="test media not downloaded (python tools/fetch_media.py)")
 
@@ -98,7 +99,7 @@ def test_every_file_is_attributed_and_freely_licensed():
     attribution = open(os.path.join(MEDIA, "ATTRIBUTION.md"), encoding="utf8").read()
     free = ("CC0", "CC BY ", "CC BY-SA ")
     for item in ITEMS:
-        assert item["license"].startswith(free) or item["license"] == "CC0", item
+        assert item["license"].startswith(free) or item["license"] in ("CC0", "Public domain"), item
         assert item["id"] in attribution and item["url"].startswith("https://upload.wikimedia.org/")
 
 
@@ -311,3 +312,57 @@ def test_brand_logos_without_text(clip, jpgs):
             wrong += guess["name"].lower().split()[0] != item["brand"].lower().split()[0]
     print(f"\nlogo brands named: {found}, wrong: {wrong}")
     assert found >= 4 and wrong <= max(0, found // 10)
+
+
+# ── Candid photos: taken by ordinary people (hands, clutter, wet streets at night) ──
+CANDID_FAMILY = {"black": {"black", "grey", "brown"}, "brown": {"brown", "orange", "red", "black", "gold"},
+                 "red": {"red", "pink", "orange"}, "silver": {"silver", "grey", "white"},
+                 "grey": {"grey", "silver", "black"}}
+needs_candid = pytest.mark.skipif(len(CANDID) < 15, reason="candid media not downloaded")
+
+
+@needs_candid
+def test_candid_category_recognition(clip):
+    from item_intake.analysis import CATEGORY_PROMPTS
+    wrong = []
+    for item in CANDID:
+        res = clip.zero_shot([path(item)], list(CATEGORY_PROMPTS.values())) or {}
+        best = max(res, key=res.get)
+        pred = next(k for k, v in CATEGORY_PROMPTS.items() if v == best)
+        if pred != item["app_category"]:
+            wrong.append((item["id"], pred))
+    assert len(wrong) <= 2, wrong
+
+
+@needs_candid
+def test_candid_camera_colour_reading(clip):
+    """Lenient (colour family) accuracy of the camera's main colour on everyday photos.
+    Exact readings are worse (black often reads grey/brown), which is why staff confirm them."""
+    import handover_check as hc
+    labelled = [i for i in CANDID if i.get("colour")]
+    ok = [i["id"] for i in labelled
+          if next(iter((hc.visual_facts(path(i)) or {"colours": {}})["colours"]), "-") in CANDID_FAMILY[i["colour"]]]
+    assert len(ok) >= len(labelled) * 0.7, (len(ok), len(labelled))
+
+
+@needs_candid
+def test_candid_photo_answers_always_go_to_staff(clip, tmp_path):
+    """No question derived only from a candid photo is ever asked without staff confirming it."""
+    import shutil
+    import handover_check as hc
+    for item in CANDID:
+        shutil.copy(path(item), tmp_path / os.path.basename(item["file"]))
+        found = {"category": item["app_category"], "image_path": os.path.basename(item["file"]), "notes": ""}
+        qs = hc.build_question_set(found, {"description": "lost it"}, str(tmp_path), classifier=clip, use_llm=False)
+        assert qs["questions"], item["id"]
+        assert not [q for q in qs["questions"] if q.get("verified")], item["id"]
+
+
+@needs_candid
+def test_candid_different_black_wallets_never_look_identical(clip):
+    """A fraudster's own black wallet must not reach the 'same photo' level against someone else's."""
+    from itertools import combinations
+    from matching import PHOTO_IDENTICAL
+    wallets = [i for i in CANDID if i["app_category"] == "wallet" and i.get("colour") == "black"]
+    sims = [clip.similarity(path(a), path(b)) for a, b in combinations(wallets, 2)]
+    assert len(sims) >= 15 and max(sims) < PHOTO_IDENTICAL, max(sims)

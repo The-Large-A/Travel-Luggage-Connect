@@ -22,6 +22,14 @@
  * @returns {L.Map}
  */
 function initMap(containerId) {
+  // Contain Leaflet's internal z-indexes (panes up to 1000) in the map's own stacking
+  // context, so route dropdowns and dialogs always appear above the map.
+  const el = document.getElementById(containerId);
+  if (el) {
+    el.style.isolation = 'isolate';
+    el.style.position = el.style.position || 'relative';
+    el.style.zIndex = '0';
+  }
   const map = L.map(containerId, {
     center: [10.8, 78.5],   // Centre of Tamil Nadu
     zoom: 7,

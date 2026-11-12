@@ -164,7 +164,8 @@ What the suite covers beyond the unit tests:
 | `python tools/match_benchmark.py` | v1 vs v2 matcher on 27 labelled reports / 26 items with hard negatives, replayed in arrival order (real SBERT; `--fake` for the test model) |
 | `tests/test_matching.py` | every evidence rule, calibration, gates, odd input (emoji, injection, 20k chars, non-strings), 400 randomised pairs, order invariance |
 | `tests/test_questions.py` | every category x question for sense, option contrast and flatness, and genuine owners vs four impostor types through the real hashing and scoring |
-| `python tools/fetch_media.py` then `tests/test_media.py` | 52 freely licensed Commons photos and clips (`datasets/media/ATTRIBUTION.md`) through real CLIP and OpenCV: same-object retrieval, description vs photo, zero-shot category and the question gate, colours, the camera-scan frame gate on video, and the matcher; skipped when the media is not downloaded |
+| `tests/test_handover.py` | name matching (Rajan ≠ Rajani), IP limits, encrypted QR (tamper, 72 h expiry, rate limit), question engine (contrast, exclusions, LLM validation), staff check, pass / escalate / lock, override, description meter and enhancer safety |
+| `python tools/fetch_media.py` then `tests/test_media.py` | 70 freely licensed Commons photos and clips (18 of them candid everyday photos) (`datasets/media/ATTRIBUTION.md`) through real CLIP and OpenCV: same-object retrieval, description vs photo, zero-shot category and the question gate, colours, the camera-scan frame gate on video, and the matcher; skipped when the media is not downloaded |
 
 ---
 
@@ -450,6 +451,70 @@ Run `python seed_bookings.py` (with `SIGNING_SECRET` set) after `seed_transport.
 sample tickets to real trips. Phone cameras need HTTPS: `HTTPS_ADHOC=1 HOST=0.0.0.0 python app.py`.
 The description writer runs offline on the CPU (Florence-2: about 2 minutes to load the first
 time, about a minute per item); set `INTAKE_VISION_PROVIDER=basic` for instant descriptions.
+
+---
+
+## 🔒 Final review: handover check, encrypted tracking QR, description meter
+
+**Counter security check** (`handover_check.py`, `handover_service.py`, `static/js/handover_modal.js`).
+A match can only be marked resolved after the claimant at the counter passes a multiple-choice
+check, or staff complete an ID check after a failed or escalated check.
+
+1. **When a match is created** the questions are built in the background (`HANDOVER_ASYNC=1`) and
+   cached for 24 h. Sources: the found photos (OpenCV: GrabCut mask, HSV k-means colours named in
+   Lab with CIEDE2000, edge density, shape, brightness, texture; CLIP zero-shot for material,
+   pattern, style and features only when clearly sure), the depot's private notes and camera-scan
+   attributes, and both descriptions. Facts the claimant already wrote in the lost report are
+   never asked (they would prove nothing).
+2. **Options contrast.** Wrong colours are never confusable with the true one or with any colour
+   on the item (ΔE00 ≥ 25; black/navy, maroon/brown never paired), the most common wrong guess
+   ("black", "leather", "plain") is included when it is wrong, and synonyms are never offered.
+   Groq (`GROQ_REASONING_MODEL`) only rewords questions; every LLM output is validated (one
+   question mark, no option text in the question, no "what object is this") or the template is used.
+3. **Staff confirm first (step 1 of 2, screen kept from the claimant).** The camera's guesses are
+   never asked unconfirmed: on candid photos it reads black wallets as brown or grey (see below).
+   Staff pick the true answer, skip what they cannot tell, and can add questions (main / second
+   colour, material, pattern, style) by choosing the true value; what they enter replaces the
+   camera's guess. Agreement with the AI is logged.
+4. **Claimant (step 2).** 4-6 questions × 4 options; the correct index never reaches the browser.
+   ≥ 75 % right: pass, resolve unlocks. 50-74 %: escalate to a staff call / ID check. Below: fail,
+   options reshuffled; 3 failed attempts lock the match (photo ID at the claims desk).
+   Guessing 3 of 4 right at random: 5.1 %; 5 of 6: < 0.5 %.
+
+**Tracking QR** (`tracking_qr.py`). Fernet-encrypted `{tracking ID, request ID, unix time}`, key
+`QR_FERNET_KEY`. Issued on every lost report, saved as `static/uploads/qr/<request id>.svg`, shown
+on the success card and the loss slip. Scans decrypt at `/verify/q/<token>`; tampered tokens and
+tokens older than 72 h are refused, and only the claim status is returned.
+
+**Description strength meter** (`static/js/description_meter.js`, `vocabulary.description_strength`).
+Live on the passenger description and the depot notes: item type, colour, brand / unique mark,
+contents, distinctive features → weak (0-30), moderate (31-60), strong (61-85), excellent (86-100),
+with tappable chips for what is missing. `POST /api/description/enhance` cleans the text with Groq;
+the result is stored separately (`descriptionEnhanced`, `notesEnhanced`) and used for SBERT
+matching; it is rejected if it adds a colour, brand, content, material or number the original did not have.
+
+**New and changed endpoints**
+
+| Method | Path | Purpose | Auth | Rate limit |
+|---|---|---|---|---|
+| POST | `/auth/id/otp/request` | Layer 1: Aadhaar / VID → OTP | none (consent) | 5 / IP / hour |
+| POST | `/auth/id/link` | Layer 2: PNR, same ID token, name ≥ 90 % | layer-1 session | 10 / IP / hour |
+| GET | `/api/matches/<id>/security-questions` | Check state (staff view or claimant questions, no answers) | depot session, own match | 60 / 10 min per depot and IP |
+| POST | `/api/matches/<id>/security-staff-check` | Staff confirm / skip / add questions | depot session | 30 / 10 min |
+| POST | `/api/matches/<id>/security-answers` | Claimant's answers → pass / escalate / fail / locked | depot session | 20 / 10 min |
+| POST | `/api/matches/<id>/security-override` | ID-checked handover after escalation | depot session, staff name | 10 / 10 min |
+| POST | `/api/match/resolve` | Unchanged route; now 409 `security_check_required` until passed or overridden | depot session | — |
+| GET | `/verify/q/<token>` | Public page for a scanned tracking QR | none | 30 / IP / 10 min |
+| POST | `/api/qr/verify` | Decrypt a scanned QR → claim status only | none | 30 / IP / 10 min |
+| POST | `/api/description/enhance` | Clean a description (stored separately) | depot or two-layer passenger session | 20 / 10 min |
+
+**Measured on everyday photos** (`tests/test_media.py::test_candid_*`, 18 candid Commons photos:
+wallets in hands and on cluttered tables, broken umbrellas on wet streets at night, a taped suitcase):
+category right 18/18; main colour in the right family 14/17, but exactly right far less often
+(black → grey/brown), so the camera's colour is never asked without staff confirming it; two
+different black wallets never reach the "same photo" level (max CLIP 0.82 < 0.92). Synthetic phone
+conditions (yellow bus light, tube light, night bus, WhatsApp JPEG, blur, glare, clutter):
+`python tools/stress_media.py`.
 
 ---
 

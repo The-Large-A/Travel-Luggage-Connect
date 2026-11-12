@@ -173,7 +173,8 @@ def test_close_shades_are_not_a_contradiction_but_opposites_are():
 def test_scanned_colour_shares_are_used_and_tiny_shares_ignored():
     scan = found("A bag.", attributes={"colours": [{"name": "red", "share": 0.7}, {"name": "green", "share": 0.05}]})
     assert "colour" in signals(M().score(scan, lost("red bag")))
-    assert "colour_conflict" in M().score(scan, lost("green bag"))["conflicts"]   # 5% green is noise
+    green = M().score(scan, lost("green bag"))                                   # 5% green is noise...
+    assert signals(green)["colour"] == -1.4 and not green["conflicts"]    # ...and camera colours are never a hard veto
 
 
 def test_contents_overlap_and_disjoint_lists():

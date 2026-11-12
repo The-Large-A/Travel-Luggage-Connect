@@ -226,7 +226,7 @@ def id_link():
     identity = current_identity()
     if identity is None:
         raise AuthError(401, "identity_required", "Please verify your Aadhaar number or VID first.")
-    booking, seq = state.identity.link_pnr(identity, body["pnr"])
+    booking, seq = state.identity.link_pnr(identity, body["pnr"], _client_ip())
     token, passenger = state.sessions.issue(booking, _client_ip(), request.headers.get("User-Agent", ""),
                                             identity=identity, passenger_seq=seq)
     payload = _passenger_json(passenger, booking)

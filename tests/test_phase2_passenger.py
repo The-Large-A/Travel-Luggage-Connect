@@ -179,7 +179,8 @@ def test_loss_slip_for_the_owner_only(p2):
     page = owner.get(f"/passenger/reports/{tracking}/slip")
     html = page.get_data(as_text=True)
     assert page.status_code == 200 and tracking in html and "<svg" in html
-    assert "Overhead rack" in html and f"/verify/{tracking}" in html
+    assert "Overhead rack" in html and "/verify/q/" in html
+    assert f"/verify/{tracking}" not in html                              # the QR never carries the ID in clear
     other = _login(app_module.app.test_client(), sms, PRIYA)
     assert other.get(f"/passenger/reports/{tracking}/slip").status_code == 404
 

@@ -37,6 +37,12 @@
         body { font-family: 'Roboto', sans-serif; background-color: #F5F7FA; color: #333; }
         .header-shadow { box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
         .gold-divider  { height: 3px; background-color: #D4960A; width: 100%; }
+        /* Stacking order. Leaflet gives its panes and controls z-indexes up to 1000;
+           `isolation: isolate` keeps them INSIDE the map's own stacking context, so the
+           map as a whole sits at z-index 0 and never covers dropdowns or dialogs. */
+        .tn-map, .leaflet-container { position: relative; isolation: isolate; z-index: 0; }
+        #route_results, #f_route_results, .tn-dropdown { z-index: 1100 !important; }
+        .tn-modal { z-index: 2000; }
         .card-professional {
             background: white;
             border: 1px solid #E2E8F0;
@@ -199,6 +205,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <!-- Our shared map logic -->
     <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/description_meter.js') }}" defer></script>
 
     {% block scripts %}{% endblock %}
 </body>

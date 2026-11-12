@@ -59,3 +59,29 @@ pending (a LaptopMedia 360° video) was left out. Audio of the packing clip is n
 | vid_02 | [International Carry-on .gif](https://commons.wikimedia.org/wiki/File:International_Carry-on_.gif) | Karldmartini | CC BY-SA 4.0 | ANIMATED GIF, not webm/mp4: aluminium carry-on rotating on white background, about 9 s |
 | vid_03 | [Aéroport international Sir-Seewoosagur-Ramgoolam (bagages).webm](https://commons.wikimedia.org/wiki/File:A%C3%A9roport_international_Sir-Seewoosagur-Ramgoolam_(bagages).webm) | Benoît Prieur | CC0 | Baggage carousel with many suitcases and bags moving past (airport, Mauritius), 16 s, 1080p |
 | vid_04 | [How To Pack Everything Into A Carry-On.webm](https://commons.wikimedia.org/wiki/File:How_To_Pack_Everything_Into_A_Carry-On.webm) | Willie Leatherwood | CC BY 3.0 | Top-down stop-motion of a carry-on suitcase being packed, 15 s |
+
+## Candid photos
+
+Everyday photos taken by ordinary people (cluttered tables, hands, wet streets at night, airport floors),
+not product shots. Colours were labelled by eye. Used by `tests/test_media.py::test_candid_*`.
+
+| id | file | author | licence | what it shows |
+|---|---|---|---|---|
+| candid_01 | [Carteira-pequena-prada-toda-couro-3 (24821138282).jpg](https://commons.wikimedia.org/wiki/File:Carteira-pequena-prada-toda-couro-3_(24821138282).jpg) | Shoichi Iwashita | CC BY 2.0 | Black leather wallet open on a patterned wooden table |
+| candid_02 | [Bifold Wallet - NARA - 7268451 (page 1).jpg](https://commons.wikimedia.org/wiki/File:Bifold_Wallet_-_NARA_-_7268451_(page_1).jpg) | Unknown author | Public domain | Worn, cracked dark leather bifold wallet (archive scan) |
+| candid_03 | [Biljettenmap van Café Het Nieuwe Arsenaal - SJ-F0243.jpg](https://commons.wikimedia.org/wiki/File:Biljettenmap_van_Caf%C3%A9_Het_Nieuwe_Arsenaal_-_SJ-F0243.jpg) | Erfgoed Denderland | CC BY-SA 4.0 | Black vinyl ticket wallet with gold print |
+| candid_04 | [Australian banknotes in wallet.jpg](https://commons.wikimedia.org/wiki/File:Australian_banknotes_in_wallet.jpg) | Martin Kingsley from Melbourne, Australia | CC BY 2.0 | Black wallet held in a hand, banknotes sticking out |
+| candid_05 | [Billetera hombre totto.jpeg](https://commons.wikimedia.org/wiki/File:Billetera_hombre_totto.jpeg) | EEIM | CC BY-SA 3.0 | Black fabric Totto wallet with a lime logo, against a peach wall |
+| candid_06 | [Japanese Wallet.JPG](https://commons.wikimedia.org/wiki/File:Japanese_Wallet.JPG) | TTTNIS | Public domain | Black leather wallet open, cards, notes and coins showing |
+| candid_07 | [Red Leather Memo Book of William Clark.jpg](https://commons.wikimedia.org/wiki/File:Red_Leather_Memo_Book_of_William_Clark.jpg) | Unknown author | Public domain | Old red-brown leather pocket book with a pencil |
+| candid_08 | [Leather wallets 04.JPG](https://commons.wikimedia.org/wiki/File:Leather_wallets_04.JPG) | Nicholas Gemini | CC BY-SA 3.0 | Black leather wallet with a blue side patch, on a bed sheet |
+| candid_09 | [Luniko portfel ręcznie robiony ze skóry z RFID na 11 kart.jpg](https://commons.wikimedia.org/wiki/File:Luniko_portfel_r%C4%99cznie_robiony_ze_sk%C3%B3ry_z_RFID_na_11_kart.jpg) | Oleksij Kołomijczuk | CC BY-SA 4.0 | Hand-stitched brown leather wallet on a wooden board |
+| candid_10 | [Python skin wallet, open, 2015-03-18.jpg](https://commons.wikimedia.org/wiki/File:Python_skin_wallet,_open,_2015-03-18.jpg) | Crisco 1492 | CC BY-SA 4.0 | Python-skin wallet, open, on black |
+| candid_11 | [Broken umbrella after Sandy.JPG](https://commons.wikimedia.org/wiki/File:Broken_umbrella_after_Sandy.JPG) | AshokaJegroo | CC BY-SA 3.0 | Broken black umbrella on a wet street at night |
+| candid_12 | [Damaged umbrellas during the September 2024 flood in Vienna 05.jpg](https://commons.wikimedia.org/wiki/File:Damaged_umbrellas_during_the_September_2024_flood_in_Vienna_05.jpg) | Herzi Pinki | CC BY-SA 4.0 | Broken black umbrella by a rubbish bin in the rain |
+| candid_13 | [Damaged umbrellas during the September 2024 flood in Vienna 04.jpg](https://commons.wikimedia.org/wiki/File:Damaged_umbrellas_during_the_September_2024_flood_in_Vienna_04.jpg) | Herzi Pinki | CC BY-SA 4.0 | Broken red umbrella lying on grass |
+| candid_14 | [Anna bhau sathe chouk..jpg](https://commons.wikimedia.org/wiki/File:Anna_bhau_sathe_chouk..jpg) | Savvywriter | CC BY-SA 4.0 | Red and grey backpack worn by a scooter rider in traffic |
+| candid_15 | [Tiffin Carrier Lack, Sammlung Gunther Lambert.jpg](https://commons.wikimedia.org/wiki/File:Tiffin_Carrier_Lack,_Sammlung_Gunther_Lambert.jpg) | Jula2812 | CC BY-SA 4.0 | Black lacquered stacked tiffin carrier |
+| candid_16 | [Henkelmann hg.jpg](https://commons.wikimedia.org/wiki/File:Henkelmann_hg.jpg) | Hannes Grobe | CC BY 3.0 | Steel tiffin carrier with a red handle |
+| candid_17 | [Suitcase mending and reinforcing by tape.jpg](https://commons.wikimedia.org/wiki/File:Suitcase_mending_and_reinforcing_by_tape.jpg) | hiroo yamagata | CC BY-SA 2.0 | Grey soft trolley suitcase held together with brown tape, airport floor |
+| candid_18 | [Damaged Luggage EWR (39061261294).jpg](https://commons.wikimedia.org/wiki/File:Damaged_Luggage_EWR_(39061261294).jpg) | formulanone from Huntsville, United States | CC BY-SA 2.0 | Close-up of a damaged black suitcase |

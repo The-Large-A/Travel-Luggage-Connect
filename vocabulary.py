@@ -447,6 +447,41 @@ def detail_slots(text, category=None) -> dict:
     return found
 
 
+# ── description strength (the live meter on the passenger AND depot forms) ───
+# Five factors, equal weight, scored over the ones that apply to the item (a
+# phone has no "contents"). Server twin of static/js/description_meter.js.
+FEATURE_WORDS = ("zip", "zipper", "strap", "straps", "handle", "wheel", "wheels", "pocket", "pockets", "keychain",
+                 "sticker", "scratch", "tag", "patch", "logo", "buckle", "lock", "chain", "mark", "marks", "stain",
+                 "tear", "torn", "crack", "cracked", "ribbon", "initials", "embroidered", "badge", "dent", "case",
+                 "cover", "hook", "frame", "keeral")
+STRENGTH_FACTORS = ("type", "colour", "identifier", "contents", "features")
+NO_CONTENTS = frozenset({"phone", "laptop", "spectacles", "umbrella"})
+STRENGTH_BANDS = ((30, "weak"), (60, "moderate"), (85, "strong"), (100, "excellent"))
+
+
+def description_strength(text, category=None) -> dict:
+    """{factor: bool, ..., "score": 0-100, "band": weak|moderate|strong|excellent, "missing": [...]}"""
+    norm = normalize_text(text or "")
+    toks = set(tokens(text or ""))
+    words = set(norm.split())
+    nouns = {n for ns in CATEGORY_NOUNS.values() for n in ns}
+    found = {
+        "type": bool(toks & nouns or words & nouns),
+        "colour": bool(toks & _COLOUR_SET),
+        "identifier": (any(re.search(rf"(?<!\w){re.escape(b)}(?!\w)", norm) for b in _BRAND_TOKENS if b)
+                       or bool(re.search(r"\d{5,}", re.sub(r"[\s-]", "", text or "")))
+                       or bool(re.search(r"(?<![a-z0-9])(?=[a-z0-9]*\d)(?=[a-z0-9]*[a-z])[a-z0-9]{5,}", norm))
+                       or _label_filled("Brand:", norm) or bool(words & {"name", "initials", "nametag"})),
+        "contents": bool(toks & _CONTENT_SET),
+        "features": bool(words & set(FEATURE_WORDS) or words & _MARK_SET or toks & {"sticker", "scratch"}),
+    }
+    applicable = [f for f in STRENGTH_FACTORS if not (f == "contents" and category in NO_CONTENTS)]
+    score = round(100 * sum(found[f] for f in applicable) / len(applicable))
+    band = next(name for top, name in STRENGTH_BANDS if score <= top)
+    return {**found, "score": score, "band": band, "missing": [f for f in applicable if not found[f]],
+            "applicable": applicable}
+
+
 def vocabulary_payload() -> dict:
     """JSON for the browser: the same word lists the server uses."""
     def variants(table, keys):
@@ -460,4 +495,10 @@ def vocabulary_payload() -> dict:
         "brands": [b.casefold() for b in ALL_BRANDS],
         "contents": variants(OBJECTS, CONTENTS),
         "marks": sorted(_MARK_SET),
+        # item nouns plus every spelling the server folds into them ("mobile" → phone)
+        "itemNouns": sorted({n for ns in CATEGORY_NOUNS.values() for n in ns} |
+                            {unicodedata.normalize("NFC", v).casefold() for k in CATEGORY_NOUNS.get("wallet", ()) +
+                             ("phone", "spectacles", "umbrella", "clothes", "laptop") for v in OBJECTS.get(k, ())}),
+        "features": list(FEATURE_WORDS),
+        "noContents": sorted(NO_CONTENTS),
     }

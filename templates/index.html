@@ -37,6 +37,14 @@
                 </div>
             </div>
         </div>
+        {% if last_qr %}
+        <figure class="flex-shrink-0 text-center">
+            <img src="{{ url_for('static', filename=last_qr) }}" alt="Encrypted QR code for this report"
+                 class="w-28 h-28 bg-white p-1 border border-green-200 rounded-md mx-auto">
+            <figcaption class="mt-1 text-[10px] text-slate-500">Encrypted QR · valid 72 h<br>
+                <a href="{{ url_for('static', filename=last_qr) }}" download class="font-bold text-tn-blue hover:underline">Save QR</a></figcaption>
+        </figure>
+        {% endif %}
         <div class="flex flex-wrap gap-2 flex-shrink-0">
             {% if pax %}
             <a href="{{ url_for('loss_slip', tracking_id=last_tracking_id) }}"
@@ -76,6 +84,16 @@
                         <a href="{{ url_for('passenger_auth.passenger_home') }}" class="text-xs font-bold text-tn-blue uppercase hover:underline">My reports</a>
                     </div>
 
+                    <!-- Verification chain: Aadhaar → PNR → names agree (all enforced by the server) -->
+                    <ol class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-bold" aria-label="Identity verification">
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-green-50 border border-green-200 text-green-800">
+                            <span aria-hidden="true">✓</span> 1 · Aadhaar / VID verified</li>
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-green-50 border border-green-200 text-green-800">
+                            <span aria-hidden="true">✓</span> 2 · Ticket PNR verified</li>
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-green-50 border border-green-200 text-green-800">
+                            <span aria-hidden="true">✓</span> 3 · Names match (≥ 90%)</li>
+                    </ol>
+
                     <!-- Journey from the ticket (filled automatically when the PNR is linked to a trip) -->
                     <div id="ticket-panel" class="hidden p-4 rounded-md bg-green-50 border border-green-200 space-y-2">
                         <div class="flex items-center justify-between gap-3">
@@ -90,7 +108,15 @@
                         </div>
                     </div>
                     {% else %}
-                    <div id="login-required" class="p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900">
+                    <div id="login-required" class="p-4 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-900 space-y-3">
+                    <ol class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-bold" aria-label="Identity verification">
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-white border border-amber-300 text-amber-900">
+                            <span aria-hidden="true">1</span> Aadhaar / VID — not verified</li>
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-slate-50 border border-slate-200 text-slate-400">
+                            <span aria-hidden="true">2</span> Ticket PNR — after step 1</li>
+                        <li class="flex items-center gap-2 p-2 rounded-md bg-slate-50 border border-slate-200 text-slate-400">
+                            <span aria-hidden="true">3</span> Names must match</li>
+                    </ol>
                         <p class="font-bold">Please log in to report a lost item.</p>
                         <p class="text-xs mt-1">Two security layers: verify your Aadhaar / VID, then your ticket's PNR. Only you will see your report and its matches.</p>
                         <a href="{{ url_for('passenger_auth.login_page', next='/') }}" class="inline-block mt-3 btn-gov-primary text-xs uppercase tracking-widest">Passenger Login</a>
@@ -250,19 +276,12 @@
                         <input type="hidden" name="description_lang" id="description_lang">
 
                         <textarea name="description" id="desc_input" required rows="3" maxlength="2000"
+                                  data-description-meter data-category-select="#category_select"
                                   class="w-full p-4 border border-slate-300 rounded-md font-medium input-focus resize-y"
                                   placeholder="e.g. Navy blue Wildcraft backpack, laptop charger and a steel tiffin inside, red tag on the zip"></textarea>
 
-                        <!-- Match readiness meter -->
-                        <div id="readiness" class="hidden space-y-1.5" role="meter" aria-label="Description detail" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                            <div class="flex items-center justify-between text-[11px] font-bold">
-                                <span class="text-slate-500 uppercase tracking-wide">AI match readiness</span>
-                                <span id="readiness_label" class="text-slate-700"></span>
-                            </div>
-                            <div class="h-2 bg-slate-200 rounded-full overflow-hidden"><div id="readiness_bar" class="h-full rounded-full" style="width:4%"></div></div>
-                            <div id="readiness_chips" class="flex flex-wrap gap-1.5"></div>
-                            <p id="category_hints" class="text-[11px] text-slate-500 italic"></p>
-                        </div>
+                        <!-- The description strength meter (static/js/description_meter.js) appears here. -->
+                        <p id="category_hints" class="text-[11px] text-slate-500 italic"></p>
                     </div>
 
                     <!-- Image Upload (enhanced into a dropzone with preview + compression) -->
@@ -282,9 +301,13 @@
                             Submit Lost Report / அறிக்கையைச் சமர்ப்பிக்கவும்
                         </button>
                         {% else %}
+                        <button type="button" disabled aria-disabled="true"
+                                class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md opacity-50 cursor-not-allowed">
+                            🔒 Submit locked until both checks pass
+                        </button>
                         <a href="{{ url_for('passenger_auth.login_page', next='/') }}"
-                           class="w-full btn-gov-primary text-sm uppercase tracking-widest shadow-md">
-                            Log in to submit / உள்நுழையவும்
+                           class="mt-2 block text-center text-xs font-bold text-tn-blue uppercase hover:underline">
+                            Verify Aadhaar, then PNR / உள்நுழையவும்
                         </a>
                         {% endif %}
                     </div>
